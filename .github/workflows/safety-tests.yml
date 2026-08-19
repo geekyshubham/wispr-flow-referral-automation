@@ -1,0 +1,15 @@
+name: safety-tests
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  kill-isolated-never-touches-main-wispr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Regression — do not kill Application Support/Wispr Flow
+        run: python3 lib/kill-isolated-wispr.py --self-test

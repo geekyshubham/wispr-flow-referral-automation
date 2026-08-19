@@ -54,6 +54,7 @@ chmod +x wispr-run wispr-cleanup wispr-test wispr-resume wispr-complete-flow lib
 When the last account is done — and also on crash / `./wispr-cleanup`:
 
 - Extra isolated Wispr processes (and their helpers) are quit; `profiles/` is deleted  
+  Cleanup **never** matches `~/Library/Application Support/Wispr Flow` (spaces in that path are handled; CI blocks regressions)  
 - ego-browser **Wispr task spaces** are closed (ego lite itself stays open)  
 - Hands-free dictation is stopped; temp TTS files are removed  
 - Default **input** and **output** go back to Built-in (BlackHole is never left selected)  

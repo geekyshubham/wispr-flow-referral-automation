@@ -28,8 +28,8 @@ python3 "${SCRIPT_DIR}/lib/set-ptt-key.py" "${PROFILE_DIR}/config.json" 61
 
 # Ensure isolated Wispr is running (restart to pick up new PTT shortcut)
 if pgrep -f "user-data-dir=${PROFILE_DIR}" >/dev/null 2>&1; then
-  pkill -f "user-data-dir=${PROFILE_DIR}" 2>/dev/null || true
-  sleep 3
+  python3 "${SCRIPT_DIR}/lib/kill-isolated-wispr.py" "$PROFILE_DIR"
+  sleep 1
 fi
 echo "  Launching isolated Wispr Flow..."
 nohup "$WISPR_BIN" --user-data-dir="$PROFILE_DIR" >/dev/null 2>&1 &
