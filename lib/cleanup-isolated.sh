@@ -11,6 +11,7 @@ if [ -z "$PROFILE_DIR" ]; then
 fi
 
 echo "Cleaning up isolated Wispr instance..."
+# Quote-safe: only this profile dir, never ~/Library/Application Support/Wispr Flow
 pkill -f "user-data-dir=${PROFILE_DIR}" 2>/dev/null || true
 sleep 2
 pkill -9 -f "user-data-dir=${PROFILE_DIR}" 2>/dev/null || true
