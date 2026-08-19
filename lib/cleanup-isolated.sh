@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Stop and delete isolated Wispr Flow profile (does NOT touch main Wispr account)
+# Stop isolated Wispr, restore system mic/speakers, optionally delete the profile.
+# Usage: cleanup-isolated.sh <profile-dir>
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PROFILE_DIR="${1:-}"
 if [ -z "$PROFILE_DIR" ]; then
   echo "Usage: $0 <profile-dir>"
@@ -10,14 +12,15 @@ fi
 
 echo "Cleaning up isolated Wispr instance..."
 pkill -f "user-data-dir=${PROFILE_DIR}" 2>/dev/null || true
-sleep 3
+sleep 2
 pkill -9 -f "user-data-dir=${PROFILE_DIR}" 2>/dev/null || true
 
 if [ -d "$PROFILE_DIR" ]; then
   rm -rf "$PROFILE_DIR"
-  echo "  Deleted profile: $PROFILE_DIR"
-else
-  echo "  Profile already removed"
+  echo "  Deleted profile: ${PROFILE_DIR}"
 fi
 
-echo "  Main Wispr Flow account untouched."
+bash "${SCRIPT_DIR}/lib/restore-audio.sh" restore 2>/dev/null || true
+bash "${SCRIPT_DIR}/lib/restore-audio.sh" builtin 2>/dev/null || true
+echo "  System mic and speakers restored."
+echo "  Main Wispr Flow account data untouched."

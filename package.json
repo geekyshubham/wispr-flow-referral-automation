@@ -1,7 +1,7 @@
 {
-  "name": "wispr-flow-tester",
+  "name": "wispr-flow-referral-automation",
   "version": "1.0.0",
   "private": true,
-  "description": "Mac automation: mail.tm signup + isolated Wispr Flow dictation to 2100 words",
+  "description": "Create N Wispr Flow referral accounts and simulate W dictated words on each, then restore system mic/speakers",
   "license": "MIT"
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Complete isolated referral flow: login test account in separate Wispr profile + 2000 word dictation
-# Usage: ./wispr-complete-flow [email] [password]
+# Complete isolated referral flow: login test account in separate Wispr profile + W-word dictation
+# Usage: TARGET_WORDS=2100 ./wispr-complete-flow [email] [password]
 # Default: flowtest64407@emalupe.com / SecureFlow2026!
 set -euo pipefail
 
@@ -10,7 +10,18 @@ PASSWORD="${2:-SecureFlow2026!}"
 PROFILE_DIR="${SCRIPT_DIR}/profiles/$(echo "$EMAIL" | cut -d@ -f1)"
 WISPR_BIN="/Applications/Wispr Flow.app/Contents/MacOS/Wispr Flow"
 DATA_DIR="${SCRIPT_DIR}/data"
+TARGET_WORDS="${TARGET_WORDS:-${WORDS:-2100}}"
 mkdir -p "$PROFILE_DIR" "$DATA_DIR"
+
+cleanup_and_restore() {
+  bash "${SCRIPT_DIR}/lib/cleanup-isolated.sh" "$PROFILE_DIR" 2>/dev/null || true
+  bash "${SCRIPT_DIR}/lib/restore-audio.sh" restore 2>/dev/null || true
+  bash "${SCRIPT_DIR}/lib/restore-audio.sh" builtin 2>/dev/null || true
+  if [ "${SKIP_RESUME_MAIN:-}" != "1" ]; then
+    bash "${SCRIPT_DIR}/lib/resume-main-wispr.sh" 2>/dev/null || true
+  fi
+}
+trap cleanup_and_restore EXIT
 
 echo "============================================"
 echo "  Wispr Isolated Complete Flow"
@@ -145,28 +156,21 @@ echo "  Isolated Wispr PID: ${ISOLATED_PID}"
 echo "  Waiting 15s for app to initialize..."
 sleep 15
 
-# Step 4: Dictate until Wispr app shows 2000+ total words (hands-free + BlackHole loopback)
+# Step 4: Dictate until Wispr shows TARGET_WORDS
 echo ""
-echo "[4/5] Dictating until Wispr shows ${TARGET_WORDS:-2000}+ total words..."
+echo "[4/5] Dictating until Wispr shows ${TARGET_WORDS}+ total words..."
 
-TARGET_WORDS="${TARGET_WORDS:-2100}"
 chmod +x "${SCRIPT_DIR}/lib/dictate-fast.sh" "${SCRIPT_DIR}/lib/cleanup-isolated.sh"
 
 if ! bash "${SCRIPT_DIR}/lib/dictate-fast.sh" "$PROFILE_DIR" "${TARGET_WORDS}"; then
-  echo "  WARNING: Did not reach ${TARGET_WORDS} words. Check mic/PTT. Not cleaning up yet."
+  echo "  WARNING: Did not reach ${TARGET_WORDS} words."
   exit 1
 fi
 
 FINAL_WORDS=$(python3 "${SCRIPT_DIR}/lib/word-count.py" "$PROFILE_DIR")
 echo "  Verified totalWords in app: ${FINAL_WORDS}"
 
-# Step 5: Cleanup isolated instance (delete profile + quit isolated app)
-echo ""
-echo "[5/5] Cleaning up isolated Wispr (your main account stays intact)..."
-bash "${SCRIPT_DIR}/lib/cleanup-isolated.sh" "$PROFILE_DIR"
-
-# Restore user's main Wispr Flow app
-bash "${SCRIPT_DIR}/lib/resume-main-wispr.sh"
+# Step 5: Cleanup runs via EXIT trap (isolated profile + mic/speakers restored)
 
 # Save completion record
 python3 - "$DATA_DIR/completions.json" "$EMAIL" "$PROFILE_DIR" "$FINAL_WORDS" <<'PY'
