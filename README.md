@@ -17,23 +17,22 @@ repeat until N accounts have W words each
 
 Web-only signup stays **Pending / Under 2000 words**. Desktop dictation is required.
 
-## Customize N and W
+## Customize N and W (runs in the background)
 
 ```bash
-# 3 accounts, 2100 words each (keeps looping until all 3 are done)
-./wispr-run --accounts 3 --words 2100
+# 2 accounts, 2100 words each — returns immediately, job keeps going
+./wispr-run --accounts 2 --words 2100
 
-# same thing, positional args
-./wispr-run 3 2100
-
-# 1 account, 500 words
+./wispr-run 2 2100                 # same
 ./wispr-run --accounts 1 --words 500
-
-# env vars
-ACCOUNTS=5 WORDS=2100 REFERRAL_CODE=SHUBHAM2270 ./wispr-run
+tail -f data/wispr-run.log         # watch progress
+./wispr-run 2 2100 --foreground    # run in this terminal instead
+./wispr-cleanup                    # abort + full reset anytime
 ```
 
-If hCaptcha blocks a signup, that attempt is skipped and the loop tries a new inbox until N succeed (up to 4×N attempts).
+Dictation uses a hidden isolated Wispr and plays TTS into BlackHole, not your speakers. After **all** accounts finish (or you stop it), it resets: isolated instances quit, temp profiles deleted, Built-in mic/speakers selected, your normal Wispr relaunched.
+
+During the job your personal Wispr is paused so deeplinks hit the isolated instance; it comes back in the final cleanup. Signup may still pop ego-browser if hCaptcha needs a click (`./wispr-resume <task-space>`).
 
 ## Mac setup
 
@@ -46,19 +45,31 @@ If hCaptcha blocks a signup, that attempt is skipped and the loop tries a new in
 ```bash
 git clone https://github.com/geekyshubham/wispr-flow-referral-automation.git
 cd wispr-flow-referral-automation
-chmod +x wispr-run wispr-test wispr-resume wispr-complete-flow lib/*.sh
-./wispr-run --accounts 1 --words 2100
+chmod +x wispr-run wispr-cleanup wispr-test wispr-resume wispr-complete-flow lib/*.sh
+./wispr-run --accounts 2 --words 2100
 ```
 
-## Cleanup (mic / speakers)
+## Cleanup (after the whole run)
 
-After each account and on exit (`Ctrl+C` included):
+When the last account is done — and also on crash / `./wispr-cleanup`:
 
-- Isolated Wispr is quit and its profile folder is deleted  
-- Default **input** and **output** devices are restored (BlackHole is never left as the system mic/speaker)  
-- Your main Wispr Flow app is relaunched at the end of `./wispr-run`
+- Extra isolated Wispr processes (and their helpers) are quit; `profiles/` is deleted  
+- ego-browser **Wispr task spaces** are closed (ego lite itself stays open)  
+- Hands-free dictation is stopped; temp TTS files are removed  
+- Default **input** and **output** go back to Built-in (BlackHole is never left selected)  
+- Your main Wispr Flow app is relaunched (account data untouched)
 
 You do not need to uninstall BlackHole; it only stays available as a device, not selected.
+
+## hCaptcha
+
+Wispr requires hCaptcha on **web email signup**. It cannot be turned off from this tool. The script clicks the checkbox when it can; if the token never fills, that attempt hands off for a human click:
+
+```bash
+./wispr-resume <task-space>
+```
+
+Login for an already-created account does not use captcha. OAuth (Google/Apple) also skips it, but this automation stays on temp-mail so it never touches your Google account.
 
 ## Other commands
 
@@ -66,7 +77,8 @@ You do not need to uninstall BlackHole; it only stays available as a device, not
 ./wispr-test 1 --no-dictation          # signup only
 ./wispr-resume <task-space>            # after manual hCaptcha click
 ./wispr-complete-flow email password   # isolated login + W words + cleanup
-bash lib/restore-audio.sh restore      # force-restore mic/speakers
+./wispr-cleanup                        # stop job + reset mic/speakers/Wispr
+bash lib/restore-audio.sh builtin      # force Built-in mic/speakers
 python3 lib/word-count.py profiles/<name>
 ```
 

@@ -1,26 +1,32 @@
 #!/usr/bin/env bash
 # Full pipeline: create N accounts, dictate W words on each, loop until all are done.
 # Usage:
-#   ./wispr-run --accounts 3 --words 2100
-#   ./wispr-run 3 2100
-#   ACCOUNTS=3 WORDS=2100 ./wispr-run
+#   ./wispr-run --accounts 2 --words 2100          # background (default)
+#   ./wispr-run 2 2100 --foreground                # watch in this terminal
+#   ACCOUNTS=2 WORDS=2100 ./wispr-run
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ACCOUNTS="${ACCOUNTS:-1}"
 WORDS="${WORDS:-${TARGET_WORDS:-2100}}"
 REFERRAL_CODE="${REFERRAL_CODE:-SHUBHAM2270}"
+FOREGROUND="${FOREGROUND:-0}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --accounts|-n) ACCOUNTS="${2:?}"; shift 2 ;;
     --words|-w) WORDS="${2:?}"; shift 2 ;;
     --referral) REFERRAL_CODE="${2:?}"; shift 2 ;;
+    --background|--bg) FOREGROUND=0; shift ;;
+    --foreground|--fg) FOREGROUND=1; shift ;;
     --help|-h)
-      echo "Usage: $0 [--accounts N] [--words W] [--referral CODE]"
+      echo "Usage: $0 [--accounts N] [--words W] [--referral CODE] [--foreground]"
       echo "       $0 [N] [W]"
       echo "  N  number of temp-mail accounts to create (default 1)"
       echo "  W  dictated words per account (default 2100)"
+      echo "  Runs in the background by default. Use --foreground to watch logs here."
+      echo "  After all accounts finish, mic/speakers and main Wispr are reset."
+      echo "  Stop + reset anytime: ./wispr-cleanup"
       exit 0
       ;;
     [0-9]*)
@@ -51,12 +57,30 @@ fi
 export SKIP_RESUME_MAIN=1
 export REFERRAL_CODE TARGET_WORDS="$WORDS" WORDS
 chmod +x "${SCRIPT_DIR}/wispr-test" "${SCRIPT_DIR}/wispr-resume" \
-  "${SCRIPT_DIR}/wispr-complete-flow" "${SCRIPT_DIR}/lib/"*.sh 2>/dev/null || true
+  "${SCRIPT_DIR}/wispr-complete-flow" "${SCRIPT_DIR}/wispr-cleanup" \
+  "${SCRIPT_DIR}/lib/"*.sh 2>/dev/null || true
+
+# Detach so the whole N-account job continues after you close the terminal.
+if [ "$FOREGROUND" != "1" ] && [ -z "${WISPR_RUN_DETACHED:-}" ]; then
+  mkdir -p "${SCRIPT_DIR}/data"
+  LOG="${SCRIPT_DIR}/data/wispr-run.log"
+  echo "Starting in background (accounts=${ACCOUNTS} words=${WORDS})."
+  echo "  Log:  ${LOG}"
+  echo "  Watch: tail -f ${LOG}"
+  echo "  Stop + reset mic/speakers: ${SCRIPT_DIR}/wispr-cleanup"
+  nohup env WISPR_RUN_DETACHED=1 FOREGROUND=1 \
+    ACCOUNTS="$ACCOUNTS" WORDS="$WORDS" REFERRAL_CODE="$REFERRAL_CODE" \
+    "${SCRIPT_DIR}/wispr-run" --accounts "$ACCOUNTS" --words "$WORDS" \
+    --referral "$REFERRAL_CODE" --foreground \
+    >> "$LOG" 2>&1 &
+  echo $! > "${SCRIPT_DIR}/data/wispr-run.pid"
+  echo "  PID:  $!"
+  exit 0
+fi
 
 restore_all() {
-  bash "${SCRIPT_DIR}/lib/restore-audio.sh" restore 2>/dev/null || true
-  bash "${SCRIPT_DIR}/lib/restore-audio.sh" builtin 2>/dev/null || true
-  bash "${SCRIPT_DIR}/lib/resume-main-wispr.sh" 2>/dev/null || true
+  rm -f "${SCRIPT_DIR}/data/wispr-run.pid"
+  bash "${SCRIPT_DIR}/lib/cleanup-all.sh" 2>/dev/null || true
 }
 trap restore_all EXIT
 
@@ -126,7 +150,9 @@ done
 echo ""
 if [ "$DONE" -ge "$ACCOUNTS" ]; then
   echo "DONE: ${DONE}/${ACCOUNTS} accounts each reached ${WORDS} words."
+  echo "Final reset: isolated Wispr gone, Built-in mic/speakers, main Wispr back."
 else
   echo "INCOMPLETE: ${DONE}/${ACCOUNTS} accounts finished after ${ATTEMPT} attempts."
+  echo "Still resetting mic/speakers and isolated Wispr..."
   exit 1
 fi
