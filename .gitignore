@@ -6,4 +6,5 @@ profiles/
 *.log
 .env
 *.aiff
+signup-page.png
 session.json
