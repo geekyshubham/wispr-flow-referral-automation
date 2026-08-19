@@ -1,0 +1,254 @@
+#!/usr/bin/env bash
+# Wispr Flow Account Creator & Dictation Tester
+# Usage: ./wispr-test <N> [--no-dictation]
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+DATA_DIR="${SCRIPT_DIR}/data"
+REFERRAL_CODE="${REFERRAL_CODE:-SHUBHAM2270}"
+SIGNUP_URL="https://wisprflow.ai/r?${REFERRAL_CODE}"
+TARGET_WORDS="${TARGET_WORDS:-2100}"
+N=1
+SKIP_DICTATION=false
+
+for arg in "$@"; do
+  case "$arg" in
+    --no-dictation) SKIP_DICTATION=true ;;
+    [0-9]*) N="$arg" ;;
+  esac
+done
+
+if ! [[ "$N" =~ ^[0-9]+$ ]] || [ "$N" -lt 1 ]; then
+  echo "Usage: $0 <N> [--no-dictation]"
+  exit 1
+fi
+
+mkdir -p "$DATA_DIR"
+ACCOUNTS_FILE="${DATA_DIR}/accounts.json"
+[ -f "$ACCOUNTS_FILE" ] || echo "[]" > "$ACCOUNTS_FILE"
+
+echo "============================================"
+echo "  Wispr Flow Account Creator (ego-browser)"
+echo "  Referral: ${REFERRAL_CODE}"
+echo "  Creating ${N} account(s)..."
+echo "============================================"
+
+run_signup() {
+  local INDEX="$1"
+  local TASK_SPACE="wispr-account-${INDEX}-$(date +%s)"
+
+  echo ""
+  echo "--- Account ${INDEX}/${N} ---"
+
+  WISPR_INDEX="$INDEX" WISPR_SIGNUP_URL="$SIGNUP_URL" WISPR_TASK_SPACE="$TASK_SPACE" \
+  ego-browser nodejs <<EOF
+const INDEX = ${INDEX}
+const SIGNUP_URL = '${SIGNUP_URL}'
+const TASK_SPACE = '${TASK_SPACE}'
+
+const task = await useOrCreateTaskSpace(TASK_SPACE)
+await cdp('Network.clearBrowserCookies', {})
+
+const domains = JSON.parse(await serverFetch('https://api.mail.tm/domains'))
+const domain = domains['hydra:member'][0].domain
+const email = 'flow' + Math.floor(Math.random() * 900000 + 100000) + '@' + domain
+const password = 'FlowTest2026!'
+
+await serverFetch('https://api.mail.tm/accounts', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ address: email, password })
+})
+const tokenData = JSON.parse(await serverFetch('https://api.mail.tm/token', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ address: email, password })
+}))
+const mailToken = tokenData.token
+cliLog('EMAIL:' + email)
+cliLog('PASSWORD:' + password)
+
+await openOrReuseTab(SIGNUP_URL, { wait: true, timeout: 30 })
+await wait(2)
+
+try {
+  const snap0 = await snapshotText()
+  const okRef = snap0.match(/button \[ref=(\d+).*?\n\s*text "OK"/s)?.[1]
+  if (okRef) await click('@' + okRef, { label: 'privacy OK' })
+} catch (e) {}
+
+await fillInput('input[name="email"]', email, { label: 'enter email' })
+
+for (let t = 0; t < 25; t++) {
+  await wait(1)
+  const tokenLen = await js('(() => document.querySelector("input[name=cf-turnstile-response]")?.value?.length || 0)()')
+  if (tokenLen > 100) break
+}
+
+await wait(2)
+let snap = await snapshotText()
+let btnRef = snap.match(/button \[ref=(\d+)/)?.[1]
+if (btnRef) await click('@' + btnRef, { label: 'continue email step' })
+await wait(5)
+
+snap = await snapshotText()
+if (!snap.includes('Password')) {
+  btnRef = snap.match(/button \[ref=(\d+)/)?.[1]
+  if (btnRef) await click('@' + btnRef, { label: 'continue email retry' })
+  await wait(5)
+  snap = await snapshotText()
+}
+cliLog('HAS_PASSWORD:' + snap.includes('Password'))
+
+if (snap.includes('Password')) {
+  await fillInput('input[name="Password"]', password, { label: 'password' })
+  await fillInput('input[name="Full-name"]', 'Flow Test User ' + INDEX, { label: 'full name' })
+  await wait(2)
+
+  snap = await snapshotText()
+  const hcRef = snap.match(/iframe \[ref=(\d+)/)?.[1]
+  if (hcRef) {
+    try { await click('@' + hcRef, { label: 'hcaptcha' }) } catch (e) {}
+    await wait(8)
+  }
+
+  // Poll until h-captcha-response token is populated
+  let hcLen = 0
+  for (let h = 0; h < 20; h++) {
+    hcLen = await js('(() => document.querySelector("textarea[name=h-captcha-response]")?.value?.length || 0)()')
+    if (hcLen > 10) break
+    if (h === 5 && hcRef) { try { await click('@' + hcRef, { label: 'hcaptcha retry' }) } catch (e) {} }
+    await wait(2)
+  }
+  cliLog('HC_TOKEN_LEN:' + hcLen)
+
+  if (hcLen <= 10) {
+    cliLog('HANDOFF:Please click the hCaptcha checkbox in ego-browser, then say continue')
+    await handOffTaskSpace(TASK_SPACE)
+    // After user solves captcha and says continue, re-run with takeOverTaskSpace
+    cliLog('VERIFIED:false')
+    cliLog('ERROR:hCaptcha requires manual completion - re-run after solving')
+  } else {
+    const submitted = await js('(() => { document.querySelector("form button")?.click(); return true })()')
+    await wait(10)
+    snap = await snapshotText()
+    cliLog('CHECK_EMAIL_SCREEN:' + snap.includes('Check your email'))
+  }
+}
+
+let verifyLink = null
+for (let i = 0; i < 30; i++) {
+  await wait(2)
+  const msgs = JSON.parse(await serverFetch('https://api.mail.tm/messages', {
+    headers: { Authorization: 'Bearer ' + mailToken }
+  }))
+  if (msgs['hydra:totalItems'] > 0) {
+    const msg = JSON.parse(await serverFetch('https://api.mail.tm/messages/' + msgs['hydra:member'][0].id, {
+      headers: { Authorization: 'Bearer ' + mailToken }
+    }))
+    const html = typeof msg.html === 'string' ? msg.html : String(msg.text || '')
+    const links = [...html.matchAll(/href="(https:\/\/[^"]+)"/g)].map(m => m[1])
+    verifyLink = links.find(l => l.includes('auth.wisprflow.com') && l.includes('verify'))
+    if (verifyLink) {
+      verifyLink = verifyLink.replace(/&amp;/g, '&')
+      break
+    }
+  }
+}
+
+if (verifyLink) {
+  await openOrReuseTab(verifyLink, { wait: true, timeout: 30 })
+  await wait(3)
+  const finalSnap = await snapshotText()
+  const verified = finalSnap.includes('all set') || finalSnap.includes('referral benefits') || finalSnap.includes('Download')
+  cliLog('VERIFIED:' + verified)
+} else {
+  cliLog('VERIFIED:false')
+  cliLog('ERROR:No verification email received')
+}
+
+await completeTaskSpace(TASK_SPACE, { keep: false })
+EOF
+}
+
+save_account() {
+  local INDEX="$1"
+  local OUTPUT="$2"
+  local EMAIL PASSWORD VERIFIED
+
+  EMAIL=$(echo "$OUTPUT" | grep '^EMAIL:' | tail -1 | cut -d: -f2-)
+  PASSWORD=$(echo "$OUTPUT" | grep '^PASSWORD:' | tail -1 | cut -d: -f2-)
+  VERIFIED=$(echo "$OUTPUT" | grep '^VERIFIED:' | tail -1 | cut -d: -f2-)
+
+  [ -n "$EMAIL" ] || return 1
+
+  python3 - "$ACCOUNTS_FILE" "$EMAIL" "$PASSWORD" "$VERIFIED" "$INDEX" "$REFERRAL_CODE" <<'PY'
+import json, sys
+from datetime import datetime, timezone
+path, email, password, verified, index, referral = sys.argv[1:7]
+with open(path) as f:
+    accounts = json.load(f)
+accounts.append({
+    "index": int(index),
+    "email": email,
+    "password": password,
+    "verified": verified.lower() == "true",
+    "referralCode": referral,
+    "createdAt": datetime.now(timezone.utc).isoformat()
+})
+with open(path, "w") as f:
+    json.dump(accounts, f, indent=2)
+print(f"  Saved: {email} (verified={verified})")
+PY
+}
+
+CREATED=0
+FAILED=0
+
+for i in $(seq 1 "$N"); do
+  OUTPUT=$(run_signup "$i" 2>&1) || true
+  echo "$OUTPUT" | grep -E '^(EMAIL|PASSWORD|VERIFIED|HAS_|CHECK_|HC_|HANDOFF|ERROR|ACTION):' || true
+
+  if echo "$OUTPUT" | grep -q '^EMAIL:'; then
+    save_account "$i" "$OUTPUT" || true
+    if echo "$OUTPUT" | grep -q 'VERIFIED:true'; then
+      CREATED=$((CREATED + 1))
+    else
+      FAILED=$((FAILED + 1))
+    fi
+  else
+    FAILED=$((FAILED + 1))
+  fi
+
+  [ "$i" -lt "$N" ] && sleep 8
+done
+
+echo ""
+echo "============================================"
+echo "  Summary: ${CREATED}/${N} verified, ${FAILED} failed"
+echo "  Accounts: ${ACCOUNTS_FILE}"
+echo "============================================"
+
+if [ "$CREATED" -gt 0 ] && [ "$SKIP_DICTATION" = false ]; then
+  echo ""
+  echo "Starting isolated Wispr login + ${TARGET_WORDS:-2100}-word dictation for verified accounts..."
+  python3 - "$ACCOUNTS_FILE" "$SCRIPT_DIR" "${TARGET_WORDS:-2100}" <<'PY'
+import json, os, subprocess, sys
+path, root, target = sys.argv[1:4]
+with open(path) as f:
+    accounts = json.load(f)
+verified = [a for a in accounts if a.get("verified")]
+if not verified:
+    sys.exit(0)
+a = verified[-1]
+env = os.environ.copy()
+env["TARGET_WORDS"] = target
+sys.exit(subprocess.call([os.path.join(root, "wispr-complete-flow"), a["email"], a["password"]], env=env))
+PY
+elif [ "$SKIP_DICTATION" = true ]; then
+  echo "Dictation skipped (--no-dictation). Next: ./wispr-complete-flow <email> <password>"
+else
+  echo "Dictation skipped (no verified accounts). If hCaptcha handed off, run ./wispr-resume <task-space>."
+fi
+
+echo "Done."

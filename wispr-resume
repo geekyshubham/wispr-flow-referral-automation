@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Complete signup after manual hCaptcha - run after user solves captcha in ego-browser
+# Usage: ./wispr-resume <task-space-id-or-name>
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+TASK="${1:-}"
+
+if [ -z "$TASK" ]; then
+  echo "Usage: $0 <task-space-id>"
+  echo "Run this after clicking hCaptcha in ego-browser when wispr-test handed off."
+  exit 1
+fi
+
+ego-browser nodejs <<EOF
+const TASK_SPACE = '${TASK}'
+await takeOverTaskSpace(TASK_SPACE)
+
+const submitted = await js('(() => { document.querySelector("form button")?.click(); return true })()')
+await wait(10)
+const snap = await snapshotText()
+cliLog('CHECK_EMAIL:' + snap.includes('Check your email'))
+
+if (!snap.includes('Check your email')) {
+  cliLog('ERROR:Still not on check-email screen. Ensure hCaptcha is solved.')
+} else {
+  cliLog('SUCCESS:Signup submitted. Check mail.tm inbox for verification link.')
+}
+EOF
