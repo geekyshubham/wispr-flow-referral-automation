@@ -15,7 +15,7 @@ repeat until N accounts have W words each
   → relaunch your normal Wispr Flow
 ```
 
-Web-only signup stays **Pending / Under 2000 words**. Desktop dictation is required.
+Web-only signup stays **Pending / Under 2000 words**. Desktop dictation is required. Referral credit uses **server** `/history/stats` (`total_words`), not the local app cache. The job waits for history upload to succeed before treating an account as done.
 
 ## Customize N and W (runs in the background)
 
@@ -30,7 +30,7 @@ tail -f data/wispr-run.log         # watch progress
 ./wispr-cleanup                    # abort + full reset anytime
 ```
 
-Dictation uses a hidden isolated Wispr and plays TTS into BlackHole, not your speakers. After **all** accounts finish (or you stop it), it resets: isolated instances quit, temp profiles deleted, Built-in mic/speakers selected, your normal Wispr relaunched.
+Dictation uses a hidden isolated Wispr and plays TTS into BlackHole, not your speakers. An account is finished only after Wispr **servers** report `total_words` ≥ W (`GET /history/stats`). The desktop app skips history upload until 10 transcripts are queued, so the job keeps dictating extra chunks until that batch actually uploads. After **all** accounts finish (or you stop it), it resets: isolated instances quit, temp profiles deleted, Built-in mic/speakers selected, your normal Wispr relaunched.
 
 During the job your personal Wispr is paused so deeplinks hit the isolated instance; it comes back in the final cleanup. Signup may still pop ego-browser if hCaptcha needs a click (`./wispr-resume <task-space>`).
 
@@ -64,13 +64,31 @@ You do not need to uninstall BlackHole; it only stays available as a device, not
 
 ## hCaptcha
 
-Wispr requires hCaptcha on **web email signup**. It cannot be turned off from this tool. The script clicks the checkbox when it can; if the token never fills, that attempt hands off for a human click:
+Wispr requires hCaptcha on **web email signup**. It cannot be turned off from this tool. There is no token to copy: the captcha is the **“I’m human” checkbox** (and sometimes a picture challenge) on the Wispr page inside **ego lite**.
+
+The script clicks it when it can. If that fails, the log prints `HANDOFF:` and ego lite **leaves that window open** on the signup form. Watch:
 
 ```bash
-./wispr-resume <task-space>
+tail -f data/wispr-run.log
 ```
 
-Login for an already-created account does not use captcha. OAuth (Google/Apple) also skips it, but this automation stays on temp-mail so it never touches your Google account.
+Look for a line like:
+
+```
+HANDOFF:Please click the hCaptcha checkbox in ego-browser, then: ./wispr-resume wispr-account-1-...
+```
+
+Then:
+
+1. Bring **ego lite** to the front (the Wispr signup tab is already on the password / captcha step).
+2. Click the checkbox; solve the image challenge if one appears.
+3. Run the command from the log:
+
+```bash
+./wispr-resume wispr-account-1-...
+```
+
+Login for an already-created account usually skips captcha. OAuth (Google/Apple) also skips it, but this automation stays on temp-mail so it never touches your Google account.
 
 ## Other commands
 

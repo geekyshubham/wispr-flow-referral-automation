@@ -31,7 +31,9 @@ esac
 echo "Cleaning up isolated Wispr instance..."
 python3 "${SCRIPT_DIR}/lib/kill-isolated-wispr.py" "$PROFILE_DIR"
 
-if [ -d "$PROFILE_DIR" ]; then
+if [ "${KEEP_PROFILE:-}" = "1" ]; then
+  echo "  KEEP_PROFILE=1 — left ${PROFILE_DIR} on disk (history not confirmed on server)"
+elif [ -d "$PROFILE_DIR" ]; then
   rm -rf "$PROFILE_DIR"
   echo "  Deleted profile: ${PROFILE_DIR}"
 fi

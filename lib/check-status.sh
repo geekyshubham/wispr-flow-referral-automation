@@ -40,18 +40,31 @@ try:
 except (FileNotFoundError, KeyError, json.JSONDecodeError):
     print("Session: NOT logged in (session.json missing or invalid)")
 
-log = os.path.join(os.path.dirname(profile).replace("/profiles", ""), "data", "isolated-wispr.log")
+repo = os.path.dirname(os.path.dirname(os.path.abspath(profile)))
+stats_py = os.path.join(repo, "lib", "fetch-server-stats.py")
+if os.path.isfile(session_path) and os.path.isfile(stats_py):
+    import subprocess
+    try:
+        out = subprocess.check_output(["python3", stats_py, profile], text=True, timeout=30)
+        print("\nServer /history/stats:")
+        print(out[:1500])
+    except Exception as e:
+        print(f"\nServer /history/stats: failed ({e})")
+
+log = os.path.join(repo, "data", "isolated-wispr.log")
 if os.path.isfile(log):
     with open(log) as f:
-        lines = f.readlines()
-    for line in reversed(lines):
-        if "User stats not initialized on the remote server" in line:
-            print("\nServer sync: stats NOT on Wispr servers yet (referral dashboard will show 0)")
-            break
-    else:
-        print("\nServer sync: check isolated-wispr.log manually")
+        text = f.read()
+    if "Too many concurrent requests" in text:
+        print("History upload: saw HTTP 503 (Too many concurrent requests)")
+    if "skipping upload to batch" in text:
+        print("History upload: small batches were skipped (need idle time / force sync)")
+    if "Uploaded " in text:
+        print("History upload: at least one transcript reached the server")
+    if "User stats not initialized on the remote server" in text:
+        print("Server sync: stats NOT initialized remotely yet")
 
 print("\nAutomated dictation:")
-print("  bash lib/dictate-handsfree.sh profiles/flowtest64407 2000")
-print("  Uses wispr-flow://start-hands-free deeplink + BlackHole audio loopback")
+print("  ./wispr-complete-flow   # waits for SERVER /history/stats, not local cache")
+print("  Referral credit uses server total_words. Local cache can lie.")
 PY

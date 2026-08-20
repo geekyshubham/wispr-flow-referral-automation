@@ -23,6 +23,14 @@ get_words() {
   python3 "${SCRIPT_DIR}/lib/word-count.py" "$ABS_PROFILE" 2>/dev/null || echo 0
 }
 
+pending_uploads() {
+  python3 "${SCRIPT_DIR}/lib/parse-remote-words.py" "$LOG" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('last_needs_uploading') or 0)"
+}
+
+uploaded_count() {
+  python3 "${SCRIPT_DIR}/lib/parse-remote-words.py" "$LOG" 2>/dev/null | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('uploaded_transcripts') or 0)"
+}
+
 log_lines() { wc -l < "$LOG" | tr -d ' '; }
 
 wait_log() {
@@ -147,10 +155,16 @@ STALL=0
 while [ "$ROUND" -lt 40 ]; do
   CURRENT=$(get_words)
   echo ""
-  echo "Round $((ROUND + 1)): ${CURRENT} / ${TARGET}"
+  echo "Round $((ROUND + 1)): ${CURRENT} / ${TARGET}  (pending uploads: $(pending_uploads), uploaded: $(uploaded_count))"
   if [ "$CURRENT" -ge "$TARGET" ]; then
-    echo "TARGET REACHED"
-    break
+    PENDING=$(pending_uploads)
+    UPLOADED=$(uploaded_count)
+    # Wispr skips /history/upload until the batch has 10 rows unless a force-sync interval is running.
+    if [ "$PENDING" -ge 10 ] || [ "$UPLOADED" -ge 8 ]; then
+      echo "TARGET REACHED (local ${CURRENT}, pending ${PENDING}, uploaded ${UPLOADED})"
+      break
+    fi
+    echo "  Local target met, but Wispr still has ${PENDING} queued (<10). Dictating extra so the batch can upload..."
   fi
 
   CHUNK="${CHUNKS[$((ROUND % ${#CHUNKS[@]}))]}"
@@ -196,6 +210,16 @@ while [ "$ROUND" -lt 40 ]; do
     [ "$STALL" -ge 6 ] && break
   else
     STALL=0
+    if tail -n 40 "$LOG" | rg -q "Too many concurrent requests"; then
+      echo "  History upload 503 — backing off 45s"
+      sleep 45
+    elif tail -n 30 "$LOG" | rg -q "skipping upload to batch"; then
+      echo "  Batch still <10 — continuing (no long pause)"
+      sleep 3
+    else
+      echo "  Pausing 20s so history can upload..."
+      sleep 20
+    fi
   fi
   ROUND=$((ROUND + 1))
 done

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Complete isolated referral flow: login test account in separate Wispr profile + W-word dictation
+# Success is SERVER /history/stats total_words (referral source of truth), not local cache.
 # Usage: TARGET_WORDS=2100 ./wispr-complete-flow [email] [password]
 # Default: flowtest64407@emalupe.com / SecureFlow2026!
 set -euo pipefail
@@ -11,10 +12,15 @@ PROFILE_DIR="${SCRIPT_DIR}/profiles/$(echo "$EMAIL" | cut -d@ -f1)"
 WISPR_BIN="/Applications/Wispr Flow.app/Contents/MacOS/Wispr Flow"
 DATA_DIR="${SCRIPT_DIR}/data"
 TARGET_WORDS="${TARGET_WORDS:-${WORDS:-2100}}"
+SERVER_OK=0
 mkdir -p "$PROFILE_DIR" "$DATA_DIR"
 
 cleanup_and_restore() {
-  bash "${SCRIPT_DIR}/lib/cleanup-isolated.sh" "$PROFILE_DIR" 2>/dev/null || true
+  if [ "$SERVER_OK" = "1" ]; then
+    KEEP_PROFILE=0 bash "${SCRIPT_DIR}/lib/cleanup-isolated.sh" "$PROFILE_DIR" 2>/dev/null || true
+  else
+    KEEP_PROFILE=1 bash "${SCRIPT_DIR}/lib/cleanup-isolated.sh" "$PROFILE_DIR" 2>/dev/null || true
+  fi
   bash "${SCRIPT_DIR}/lib/restore-audio.sh" restore 2>/dev/null || true
   bash "${SCRIPT_DIR}/lib/restore-audio.sh" builtin 2>/dev/null || true
   if [ "${SKIP_RESUME_MAIN:-}" != "1" ]; then
@@ -27,12 +33,13 @@ echo "============================================"
 echo "  Wispr Isolated Complete Flow"
 echo "  Account:  ${EMAIL}"
 echo "  Profile:  ${PROFILE_DIR}"
+echo "  Target:   ${TARGET_WORDS} SERVER words (referral)"
 echo "  (Your main Wispr account is NOT touched)"
 echo "============================================"
 
 # Step 1: Login via ego-browser (isolated task space) and capture auth token
 echo ""
-echo "[1/4] Signing in via ego-browser (isolated browser session)..."
+echo "[1/5] Signing in via ego-browser (isolated browser session)..."
 
 TOKEN_JSON=$(ego-browser nodejs <<EOF 2>&1
 const EMAIL = '${EMAIL}'
@@ -42,6 +49,12 @@ await cdp('Network.clearBrowserCookies', {})
 await openOrReuseTab('https://wisprflow.ai/login', { wait: true, timeout: 30 })
 await wait(2)
 
+try {
+  const snap0 = await snapshotText()
+  const okRef = snap0.match(/button \\[ref=(\\d+).*?\\n\\s*text "OK"/s)?.[1]
+  if (okRef) await click('@' + okRef, { label: 'privacy OK' })
+} catch (e) {}
+
 await fillInput('input[name="email"]', EMAIL, { label: 'email' })
 for (let t = 0; t < 25; t++) {
   await wait(1)
@@ -49,12 +62,12 @@ for (let t = 0; t < 25; t++) {
 }
 await wait(2)
 let snap = await snapshotText()
-let btn = snap.match(/button \[ref=(\d+)/)?.[1]
+let btn = snap.match(/button \\[ref=(\\d+)/)?.[1]
 if (btn) await click('@' + btn)
 await wait(5)
 snap = await snapshotText()
-if (!snap.includes('Password') && snap.match(/button \[ref=(\d+)/)?.[1]) {
-  await click('@' + snap.match(/button \[ref=(\d+)/)[1])
+if (!snap.includes('Password') && snap.match(/button \\[ref=(\\d+)/)?.[1]) {
+  await click('@' + snap.match(/button \\[ref=(\\d+)/)[1])
   await wait(5)
   snap = await snapshotText()
 }
@@ -63,14 +76,25 @@ if (snap.includes('Password')) {
   await fillInput('input[name="Password"]', PASSWORD, { label: 'pwd' })
   await wait(1)
   snap = await snapshotText()
-  btn = snap.match(/button \[ref=(\d+)/)?.[1]
-  if (btn) await click('@' + btn)
-  await wait(6)
+  const boxRef = snap.match(/checkbox \\[ref=(\\d+)/)?.[1]
+  const hcRef = snap.match(/iframe \\[ref=(\\d+)/)?.[1]
+  if (boxRef) { try { await click('@' + boxRef, { label: 'hcaptcha checkbox' }) } catch (e) {} }
+  else if (hcRef) { try { await click('@' + hcRef, { label: 'hcaptcha' }) } catch (e) {} }
+  let hcLen = 0
+  for (let h = 0; h < 20; h++) {
+    hcLen = await js('(() => document.querySelector("textarea[name=h-captcha-response]")?.value?.length || 0)()')
+    if (hcLen > 10) break
+    await wait(2)
+  }
+  cliLog('HC_TOKEN_LEN:' + hcLen)
+  await js('(() => { const f = document.querySelector("form"); if (f && f.requestSubmit) f.requestSubmit(); else f && f.submit(); return true })()')
+  await wait(8)
 }
 
 const token = await js('(() => localStorage.getItem("sb-dodjkfqhwrzqjwkfnthl-auth-token"))()')
 if (!token) {
   cliLog('ERROR:Login failed - no auth token')
+  cliLog('URL:' + (await pageInfo()).url)
 } else {
   cliLog('TOKEN_OK:yes')
   cliLog('TOKEN_JSON_START')
@@ -89,19 +113,38 @@ if 'TOKEN_JSON_START' not in text:
 start = text.index('TOKEN_JSON_START') + len('TOKEN_JSON_START')
 end = text.index('TOKEN_JSON_END')
 print(text[start:end].strip())
-")
+") || true
 
-if [ -z "$TOKEN" ]; then
-  echo "ERROR: Could not obtain auth token. Check email/password."
-  echo "$TOKEN_JSON" | grep -E '^(ERROR|TOKEN_OK):' || true
+if [ -z "${TOKEN:-}" ]; then
+  echo "ERROR: Could not obtain auth token. Check email/password/hCaptcha."
+  echo "$TOKEN_JSON" | grep -E '^(ERROR|TOKEN_OK|HC_TOKEN_LEN|URL):' || true
   exit 1
 fi
 
 echo "  Auth token obtained for ${EMAIL}"
+TOKEN_FILE="${DATA_DIR}/last-web-token.json"
+printf '%s\n' "$TOKEN" > "$TOKEN_FILE"
 
-# Step 2: Inject session into isolated Wispr profile
 echo ""
-echo "[2/4] Creating isolated Wispr Flow profile..."
+echo "[2/5] Checking SERVER word count (referral source of truth)..."
+SERVER_NOW=$(python3 "${SCRIPT_DIR}/lib/fetch-server-stats.py" --quiet --token-file "$TOKEN_FILE" 2>/dev/null || echo -1)
+python3 "${SCRIPT_DIR}/lib/fetch-server-stats.py" --token-file "$TOKEN_FILE" 2>/dev/null | python3 -c "
+import sys, json
+raw = sys.stdin.read()
+try:
+    d = json.loads(raw)
+except Exception:
+    print('  Could not parse history/stats')
+    sys.exit(0)
+print(f\"  Server total_words: {d.get('total_words')}\")
+print(f\"  is_initialized: {d.get('is_initialized')}\")
+print(f\"  words_this_week: {d.get('words_this_week')}\")
+" || true
+echo "  Server words now: ${SERVER_NOW}"
+
+# Step 3: Inject session into isolated Wispr profile
+echo ""
+echo "[3/5] Creating isolated Wispr Flow profile..."
 
 python3 - "$PROFILE_DIR" "$TOKEN" "$EMAIL" <<'PY'
 import json, sys, os
@@ -121,6 +164,9 @@ user.update({
     "onboardingCompleted": True,
     "postOnboardingCompleted": True,
     "speedyOnboardingAccepted": True,
+    "shareUsageData": True,
+    "cloudSync": True,
+    "initialSubscriptionSynced": True,
 })
 if "pagesCompleted" not in user:
     user["pagesCompleted"] = [{"page": "welcome-basic", "completed": True}]
@@ -138,41 +184,63 @@ with open(config_path, "w") as f:
     json.dump(config, f, indent=2)
 
 stats = prefs.get("cache", {}).get("statistics", {})
-print(f"  Profile updated (preserved local totalWords={stats.get('totalWords', 0)})")
+print(f"  Profile updated (local cache totalWords={stats.get('totalWords', 0)})")
 PY
+python3 "${SCRIPT_DIR}/lib/ensure-isolated-prefs.py" "${PROFILE_DIR}/config.json"
+python3 "${SCRIPT_DIR}/lib/set-blackhole-mic.py" "${PROFILE_DIR}/config.json"
 
-# Step 3: Launch isolated Wispr Flow instance
-echo ""
-echo "[3/4] Launching isolated Wispr Flow (separate from your main account)..."
+if [ "$SERVER_NOW" -ge "$TARGET_WORDS" ] 2>/dev/null; then
+  echo "  Already at ${SERVER_NOW} server words — skipping dictation."
+  SERVER_OK=1
+  FINAL_WORDS="$SERVER_NOW"
+else
+  # Step 4: Launch isolated Wispr Flow instance
+  echo ""
+  echo "[4/5] Launching isolated Wispr Flow (separate from your main account)..."
 
-# Kill any prior isolated instance using this profile
-pkill -f "user-data-dir=${PROFILE_DIR}" 2>/dev/null || true
-sleep 2
+  python3 "${SCRIPT_DIR}/lib/kill-isolated-wispr.py" "$PROFILE_DIR" 2>/dev/null || true
+  sleep 2
 
-# Launch isolated instance in background
-nohup "$WISPR_BIN" --user-data-dir="$PROFILE_DIR" > "${DATA_DIR}/isolated-wispr.log" 2>&1 &
-ISOLATED_PID=$!
-echo "  Isolated Wispr PID: ${ISOLATED_PID}"
-echo "  Waiting 15s for app to initialize..."
-sleep 15
+  : > "${DATA_DIR}/isolated-wispr.log"
+  nohup "$WISPR_BIN" --user-data-dir="$PROFILE_DIR" > "${DATA_DIR}/isolated-wispr.log" 2>&1 &
+  ISOLATED_PID=$!
+  disown "$ISOLATED_PID" 2>/dev/null || true
+  echo "  Isolated Wispr PID: ${ISOLATED_PID}"
+  echo "  Waiting 15s for app to initialize..."
+  sleep 15
 
-# Step 4: Dictate until Wispr shows TARGET_WORDS
-echo ""
-echo "[4/5] Dictating until Wispr shows ${TARGET_WORDS}+ total words..."
+  echo ""
+  echo "[5/5] Dictating until SERVER shows ${TARGET_WORDS}+ words..."
 
-chmod +x "${SCRIPT_DIR}/lib/dictate-fast.sh" "${SCRIPT_DIR}/lib/cleanup-isolated.sh"
+  chmod +x "${SCRIPT_DIR}/lib/dictate-fast.sh" "${SCRIPT_DIR}/lib/cleanup-isolated.sh" \
+    "${SCRIPT_DIR}/lib/wait-server-words.sh"
 
-if ! bash "${SCRIPT_DIR}/lib/dictate-fast.sh" "$PROFILE_DIR" "${TARGET_WORDS}"; then
-  echo "  WARNING: Did not reach ${TARGET_WORDS} words."
-  exit 1
+  CYCLE=0
+  while [ "$CYCLE" -lt 4 ]; do
+    SERVER_NOW=$(python3 "${SCRIPT_DIR}/lib/fetch-server-stats.py" --quiet "$PROFILE_DIR" 2>/dev/null || echo -1)
+    echo "  Cycle $((CYCLE + 1)): server words=${SERVER_NOW} (target ${TARGET_WORDS})"
+    if [ "$SERVER_NOW" -ge "$TARGET_WORDS" ] 2>/dev/null; then
+      SERVER_OK=1
+      break
+    fi
+    LOCAL_GOAL=$((TARGET_WORDS + CYCLE * 500))
+    echo "  Dictating until local cache >= ${LOCAL_GOAL}, then waiting for upload..."
+    bash "${SCRIPT_DIR}/lib/dictate-fast.sh" "$PROFILE_DIR" "${LOCAL_GOAL}" || true
+    WAIT_SERVER_TIMEOUT=240 bash "${SCRIPT_DIR}/lib/wait-server-words.sh" "$PROFILE_DIR" "${TARGET_WORDS}" && {
+      SERVER_OK=1
+      break
+    }
+    CYCLE=$((CYCLE + 1))
+  done
+
+  if [ "$SERVER_OK" != "1" ]; then
+    echo "  ERROR: Server still below ${TARGET_WORDS} after ${CYCLE} cycles. Profile kept for retry."
+    python3 "${SCRIPT_DIR}/lib/fetch-server-stats.py" "$PROFILE_DIR" 2>/dev/null || true
+    exit 1
+  fi
+  FINAL_WORDS=$(python3 "${SCRIPT_DIR}/lib/fetch-server-stats.py" --quiet "$PROFILE_DIR" 2>/dev/null || echo 0)
 fi
 
-FINAL_WORDS=$(python3 "${SCRIPT_DIR}/lib/word-count.py" "$PROFILE_DIR")
-echo "  Verified totalWords in app: ${FINAL_WORDS}"
-
-# Step 5: Cleanup runs via EXIT trap (isolated profile + mic/speakers restored)
-
-# Save completion record
 python3 - "$DATA_DIR/completions.json" "$EMAIL" "$PROFILE_DIR" "$FINAL_WORDS" <<'PY'
 import json, sys
 from datetime import datetime, timezone
@@ -185,9 +253,10 @@ except FileNotFoundError:
 data.append({
     "email": email,
     "profileDir": profile,
-    "totalWords": int(sys.argv[4]) if len(sys.argv) > 4 else 0,
+    "serverTotalWords": int(sys.argv[4]) if len(sys.argv) > 4 else 0,
     "completedAt": datetime.now(timezone.utc).isoformat(),
     "isolated": True,
+    "serverConfirmed": True,
     "cleanedUp": True
 })
 with open(path, "w") as f:
@@ -197,7 +266,7 @@ PY
 echo ""
 echo "============================================"
 echo "  COMPLETE"
-echo "  Account:    ${EMAIL}"
-echo "  totalWords: ${FINAL_WORDS} (target ${TARGET_WORDS})"
+echo "  Account:           ${EMAIL}"
+echo "  SERVER totalWords: ${FINAL_WORDS} (target ${TARGET_WORDS})"
 echo "  Isolated profile deleted. Main account untouched."
 echo "============================================"
