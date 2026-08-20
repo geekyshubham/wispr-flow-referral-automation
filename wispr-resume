@@ -1,28 +1,47 @@
 #!/usr/bin/env bash
-# Complete signup after manual hCaptcha - run after user solves captcha in ego-browser
+# Complete signup after manual hCaptcha - run after user solves captcha in ego lite
 # Usage: ./wispr-resume <task-space-id-or-name>
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TASK="${1:-}"
 
 if [ -z "$TASK" ]; then
   echo "Usage: $0 <task-space-id>"
-  echo "Run this after clicking hCaptcha in ego-browser when wispr-test handed off."
+  echo "Run this after clicking hCaptcha in ego lite when wispr-test handed off."
   exit 1
 fi
 
+HEADER=$(python3 -c 'import json,sys; print("const TASK_SPACE = %s;" % json.dumps(sys.argv[1]))' "$TASK")
+
 ego-browser nodejs <<EOF
-const TASK_SPACE = '${TASK}'
+${HEADER}
 await takeOverTaskSpace(TASK_SPACE)
 
-const submitted = await js('(() => { document.querySelector("form button")?.click(); return true })()')
+const setName = async (name) => {
+  return await js(
+    '(() => { const el = document.querySelector("input[name=Full-name]"); if (!el) return "NO_EL"; el.focus(); const d = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value"); const v = ' +
+      JSON.stringify(name) +
+      '; if (d && d.set) d.set.call(el, v); else el.value = v; el.dispatchEvent(new Event("input", { bubbles: true })); el.dispatchEvent(new Event("change", { bubbles: true })); return el.value; })()'
+  )
+}
+
+let snap = await snapshotText()
+cliLog('BEFORE:' + snap.replace(/\n/g, ' ').slice(0, 500))
+if (snap.includes('Password') || snap.toLowerCase().includes('name')) {
+  const written = await setName('Alex Rivera')
+  cliLog('NAME_SET:' + written)
+  await wait(1)
+}
+
+const how = await js('(() => { const btn = [...document.querySelectorAll("button")].find(b => /continue/i.test((b.innerText || b.textContent || "").trim())); const f = document.querySelector("form"); if (btn) { btn.click(); if (f && f.requestSubmit) { try { f.requestSubmit(btn) } catch (e) { f.requestSubmit() } } return "clicked"; } if (f && f.requestSubmit) { f.requestSubmit(); return "requestSubmit"; } return "no-button"; })()')
+cliLog('SUBMIT:' + how)
 await wait(10)
-const snap = await snapshotText()
+snap = await snapshotText()
 cliLog('CHECK_EMAIL:' + snap.includes('Check your email'))
 
 if (!snap.includes('Check your email')) {
-  cliLog('ERROR:Still not on check-email screen. Ensure hCaptcha is solved.')
+  cliLog('ERROR:Still not on check-email screen. Name must have no digits; hCaptcha must stay solved.')
+  cliLog('SNAP:' + snap.replace(/\n/g, ' ').slice(0, 600))
 } else {
   cliLog('SUCCESS:Signup submitted. Check mail.tm inbox for verification link.')
 }

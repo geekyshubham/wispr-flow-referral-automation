@@ -210,15 +210,11 @@ while [ "$ROUND" -lt 40 ]; do
     [ "$STALL" -ge 6 ] && break
   else
     STALL=0
-    if tail -n 40 "$LOG" | rg -q "Too many concurrent requests"; then
+    if tail -n 80 "$LOG" | rg -q "Too many concurrent requests"; then
       echo "  History upload 503 — backing off 45s"
       sleep 45
-    elif tail -n 30 "$LOG" | rg -q "skipping upload to batch"; then
-      echo "  Batch still <10 — continuing (no long pause)"
-      sleep 3
     else
-      echo "  Pausing 20s so history can upload..."
-      sleep 20
+      sleep 2
     fi
   fi
   ROUND=$((ROUND + 1))

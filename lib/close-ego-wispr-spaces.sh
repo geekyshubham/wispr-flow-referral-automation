@@ -14,6 +14,9 @@ for (const s of spaces || []) {
   const name = String(s.name || s.taskId || '')
   if (!/^wispr/i.test(name)) continue
   try {
+    if (s.ownership === 'user' || s.ownership === 'agentDelegatedToUser') {
+      try { await claimTaskSpace(s.id) } catch (e) {}
+    }
     await completeTaskSpace(s.id, { keep: false })
     closed += 1
     cliLog('CLOSED_SPACE:' + name)

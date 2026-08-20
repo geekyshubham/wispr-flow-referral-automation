@@ -39,142 +39,205 @@ run_signup() {
 
   echo ""
   echo "--- Account ${INDEX}/${N} ---"
+  echo "  Task space: ${TASK_SPACE}"
 
-  WISPR_INDEX="$INDEX" WISPR_SIGNUP_URL="$SIGNUP_URL" WISPR_TASK_SPACE="$TASK_SPACE" \
+  # ego-browser does not pass process.env into the script. Inject constants
+  # with Python JSON so the heredoc can stay free of JS backticks.
+  local HEADER
+  HEADER=$(python3 -c 'import json,sys; print("const INDEX = %d;\nconst SIGNUP_URL = %s;\nconst TASK_SPACE = %s;" % (int(sys.argv[1]), json.dumps(sys.argv[2]), json.dumps(sys.argv[3])))' "$INDEX" "$SIGNUP_URL" "$TASK_SPACE")
+
   ego-browser nodejs <<EOF
-const INDEX = ${INDEX}
-const SIGNUP_URL = '${SIGNUP_URL}'
-const TASK_SPACE = '${TASK_SPACE}'
-
-const task = await useOrCreateTaskSpace(TASK_SPACE)
-await cdp('Network.clearBrowserCookies', {})
-
-const domains = JSON.parse(await serverFetch('https://api.mail.tm/domains'))
-const domain = domains['hydra:member'][0].domain
-const email = 'flow' + Math.floor(Math.random() * 900000 + 100000) + '@' + domain
-const password = 'FlowTest2026!'
-
-await serverFetch('https://api.mail.tm/accounts', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ address: email, password })
-})
-const tokenData = JSON.parse(await serverFetch('https://api.mail.tm/token', {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ address: email, password })
-}))
-const mailToken = tokenData.token
-cliLog('EMAIL:' + email)
-cliLog('PASSWORD:' + password)
-
-await openOrReuseTab(SIGNUP_URL, { wait: true, timeout: 30 })
-await wait(2)
+${HEADER}
+cliLog('TASK:' + TASK_SPACE)
 
 try {
-  const snap0 = await snapshotText()
-  const okRef = snap0.match(/button \[ref=(\d+).*?\n\s*text "OK"/s)?.[1]
-  if (okRef) await click('@' + okRef, { label: 'privacy OK' })
-} catch (e) {}
+  if (!SIGNUP_URL || !TASK_SPACE) {
+    throw new Error('missing SIGNUP_URL or TASK_SPACE')
+  }
 
-await fillInput('input[name="email"]', email, { label: 'enter email' })
+  const task = await useOrCreateTaskSpace(TASK_SPACE)
+  await cdp('Network.clearBrowserCookies', {})
 
-for (let t = 0; t < 25; t++) {
-  await wait(1)
-  const tokenLen = await js('(() => document.querySelector("input[name=cf-turnstile-response]")?.value?.length || 0)()')
-  if (tokenLen > 100) break
-}
+  const domains = JSON.parse(await serverFetch('https://api.mail.tm/domains'))
+  const domain = domains['hydra:member'][0].domain
+  const email = 'flow' + Math.floor(Math.random() * 900000 + 100000) + '@' + domain
+  const password = 'FlowTest2026!'
 
-await wait(2)
-let snap = await snapshotText()
-let btnRef = snap.match(/button \[ref=(\d+)/)?.[1]
-if (btnRef) await click('@' + btnRef, { label: 'continue email step' })
-await wait(5)
+  const created = await serverFetch('https://api.mail.tm/accounts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ address: email, password })
+  })
+  cliLog('MAIL_CREATE:' + String(created).slice(0, 120))
+  const tokenData = JSON.parse(await serverFetch('https://api.mail.tm/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ address: email, password })
+  }))
+  const mailToken = tokenData.token
+  if (!mailToken) throw new Error('mail.tm token failed: ' + JSON.stringify(tokenData).slice(0, 200))
+  cliLog('EMAIL:' + email)
+  cliLog('PASSWORD:' + password)
 
-snap = await snapshotText()
-if (!snap.includes('Password')) {
-  btnRef = snap.match(/button \[ref=(\d+)/)?.[1]
-  if (btnRef) await click('@' + btnRef, { label: 'continue email retry' })
-  await wait(5)
-  snap = await snapshotText()
-}
-cliLog('HAS_PASSWORD:' + snap.includes('Password'))
-
-let handedOff = false
-if (snap.includes('Password')) {
-  await fillInput('input[name="Password"]', password, { label: 'password' })
-  await fillInput('input[name="Full-name"]', 'Flow Test User ' + INDEX, { label: 'full name' })
+  await openOrReuseTab(SIGNUP_URL, { wait: true, timeout: 30 })
   await wait(2)
 
+  try {
+    const snap0 = await snapshotText()
+    const okRef = snap0.match(/button \[ref=(\d+).*?\n\s*text "OK"/s)?.[1]
+    if (okRef) await click('@' + okRef, { label: 'privacy OK' })
+  } catch (e) {}
+
+  await fillInput('input[name="email"]', email, { label: 'enter email' })
+
+  for (let t = 0; t < 25; t++) {
+    await wait(1)
+    const tokenLen = await js('(() => document.querySelector("input[name=cf-turnstile-response]")?.value?.length || 0)()')
+    if (tokenLen > 100) break
+  }
+
+  await wait(2)
+  let snap = await snapshotText()
+  let btnRef = snap.match(/button \[ref=(\d+)/)?.[1]
+  if (btnRef) await click('@' + btnRef, { label: 'continue email step' })
+  await wait(5)
+
   snap = await snapshotText()
-  const hcRef = snap.match(/iframe \[ref=(\d+)/)?.[1]
-  const boxRef = snap.match(/checkbox \[ref=(\d+)/)?.[1]
-  if (boxRef) {
-    try { await click('@' + boxRef, { label: 'hcaptcha checkbox' }) } catch (e) {}
-  } else if (hcRef) {
-    try { await click('@' + hcRef, { label: 'hcaptcha' }) } catch (e) {}
-  }
-  await wait(8)
-
-  let hcLen = 0
-  for (let h = 0; h < 20; h++) {
-    hcLen = await js('(() => document.querySelector("textarea[name=h-captcha-response]")?.value?.length || 0)()')
-    if (hcLen > 10) break
-    if (h === 5) {
-      const again = (await snapshotText()).match(/checkbox \[ref=(\d+)/)?.[1] || hcRef
-      if (again) { try { await click('@' + again, { label: 'hcaptcha retry' }) } catch (e) {} }
-    }
-    await wait(2)
-  }
-  cliLog('HC_TOKEN_LEN:' + hcLen)
-
-  if (hcLen <= 10) {
-    cliLog('HANDOFF:Please click the hCaptcha checkbox in ego-browser, then: ./wispr-resume ' + TASK_SPACE)
-    await handOffTaskSpace(TASK_SPACE)
-    cliLog('VERIFIED:false')
-    cliLog('ERROR:hCaptcha requires a human click — Wispr requires it on web signup')
-    handedOff = true
-  } else {
-    await js('(() => { document.querySelector("form button")?.click(); return true })()')
-    await wait(10)
+  if (!snap.includes('Password')) {
+    btnRef = snap.match(/button \[ref=(\d+)/)?.[1]
+    if (btnRef) await click('@' + btnRef, { label: 'continue email retry' })
+    await wait(5)
     snap = await snapshotText()
-    cliLog('CHECK_EMAIL_SCREEN:' + snap.includes('Check your email'))
   }
-}
+  cliLog('HAS_PASSWORD:' + snap.includes('Password'))
 
-if (!handedOff) {
-  let verifyLink = null
-  for (let i = 0; i < 30; i++) {
-    await wait(2)
-    const msgs = JSON.parse(await serverFetch('https://api.mail.tm/messages', {
-      headers: { Authorization: 'Bearer ' + mailToken }
-    }))
-    if (msgs['hydra:totalItems'] > 0) {
-      const msg = JSON.parse(await serverFetch('https://api.mail.tm/messages/' + msgs['hydra:member'][0].id, {
-        headers: { Authorization: 'Bearer ' + mailToken }
-      }))
-      const html = typeof msg.html === 'string' ? msg.html : String(msg.text || '')
-      const links = [...html.matchAll(/href="(https:\/\/[^"]+)"/g)].map(m => m[1])
-      verifyLink = links.find(l => l.includes('auth.wisprflow.com') && l.includes('verify'))
-      if (verifyLink) {
-        verifyLink = verifyLink.replace(/&amp;/g, '&')
-        break
+  const FIRST = ['Alex', 'Jordan', 'Taylor', 'Morgan', 'Riley', 'Casey', 'Avery', 'Quinn']
+  const LAST = ['Rivera', 'Patel', 'Nguyen', 'Brooks', 'Walker', 'Bennett', 'Hayes', 'Foster']
+  const fullName = FIRST[(INDEX - 1 + FIRST.length) % FIRST.length] + ' ' + LAST[Math.floor(Math.random() * LAST.length)]
+
+  const setName = async (name) => {
+    const written = await js(
+      '(() => { const el = document.querySelector("input[name=Full-name]"); if (!el) return "NO_EL"; el.focus(); const d = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value"); const v = ' +
+        JSON.stringify(name) +
+        '; if (d && d.set) d.set.call(el, v); else el.value = v; el.dispatchEvent(new Event("input", { bubbles: true })); el.dispatchEvent(new Event("change", { bubbles: true })); return el.value; })()'
+    )
+    cliLog('NAME_SET:' + written)
+    return written
+  }
+
+  const clickContinue = async () => {
+    const how = await js('(() => { const btn = [...document.querySelectorAll("button")].find(b => /continue/i.test((b.innerText || b.textContent || "").trim())); const f = document.querySelector("form"); if (btn) { btn.click(); if (f && f.requestSubmit) { try { f.requestSubmit(btn) } catch (e) { f.requestSubmit() } } return "clicked"; } if (f && f.requestSubmit) { f.requestSubmit(); return "requestSubmit"; } if (f) { f.submit(); return "submit"; } return "no-button"; })()')
+    cliLog('SUBMIT:' + how)
+    return how
+  }
+
+  let handedOff = false
+  if (snap.includes('Password')) {
+    await fillInput('input[name="Password"]', password, { label: 'password' })
+    cliLog('FULL_NAME:' + fullName)
+    await setName(fullName)
+    await wait(1)
+
+    snap = await snapshotText()
+    if (snap.includes('numbers')) {
+      await setName('Alex Rivera')
+      await wait(1)
+      snap = await snapshotText()
+    }
+
+    const hcRef = snap.match(/iframe \[ref=(\d+)/)?.[1]
+    const boxRef = snap.match(/checkbox \[ref=(\d+)/)?.[1]
+    if (boxRef) {
+      try { await click('@' + boxRef, { label: 'hcaptcha checkbox' }) } catch (e) {}
+    } else if (hcRef) {
+      try { await click('@' + hcRef, { label: 'hcaptcha' }) } catch (e) {}
+    }
+    await wait(8)
+
+    let hcLen = 0
+    for (let h = 0; h < 20; h++) {
+      hcLen = await js('(() => document.querySelector("textarea[name=h-captcha-response]")?.value?.length || 0)()')
+      if (hcLen > 10) break
+      if (h === 5) {
+        const again = (await snapshotText()).match(/checkbox \[ref=(\d+)/)?.[1] || hcRef
+        if (again) { try { await click('@' + again, { label: 'hcaptcha retry' }) } catch (e) {} }
+      }
+      await wait(2)
+    }
+    cliLog('HC_TOKEN_LEN:' + hcLen)
+
+    if (hcLen <= 10) {
+      cliLog('HANDOFF:Please click the hCaptcha checkbox in ego lite, then: ./wispr-resume ' + TASK_SPACE)
+      await handOffTaskSpace(TASK_SPACE)
+      cliLog('VERIFIED:false')
+      cliLog('ERROR:hCaptcha requires a human click — Wispr requires it on web signup')
+      handedOff = true
+    } else {
+      await clickContinue()
+      await wait(6)
+      snap = await snapshotText()
+      if (snap.includes('numbers')) {
+        await setName('Alex Rivera')
+        await wait(1)
+        await clickContinue()
+        await wait(6)
+        snap = await snapshotText()
+      }
+      cliLog('CHECK_EMAIL_SCREEN:' + snap.includes('Check your email'))
+      if (!snap.includes('Check your email')) {
+        cliLog('ERROR:Continue did not submit')
+        cliLog('SNAP:' + snap.replace(/\n/g, ' ').slice(0, 400))
       }
     }
-  }
-
-  if (verifyLink) {
-    await openOrReuseTab(verifyLink, { wait: true, timeout: 30 })
-    await wait(3)
-    const finalSnap = await snapshotText()
-    const verified = finalSnap.includes('all set') || finalSnap.includes('referral benefits') || finalSnap.includes('Download')
-    cliLog('VERIFIED:' + verified)
   } else {
-    cliLog('VERIFIED:false')
-    cliLog('ERROR:No verification email received')
+    cliLog('ERROR:Never reached password step')
+    cliLog('SNAP:' + snap.replace(/\n/g, ' ').slice(0, 400))
   }
 
-  await completeTaskSpace(TASK_SPACE, { keep: false })
+  if (!handedOff && snap && snap.includes('Check your email')) {
+    let verifyLink = null
+    for (let i = 0; i < 30; i++) {
+      await wait(2)
+      const msgs = JSON.parse(await serverFetch('https://api.mail.tm/messages', {
+        headers: { Authorization: 'Bearer ' + mailToken }
+      }))
+      if (msgs['hydra:totalItems'] > 0) {
+        const msg = JSON.parse(await serverFetch('https://api.mail.tm/messages/' + msgs['hydra:member'][0].id, {
+          headers: { Authorization: 'Bearer ' + mailToken }
+        }))
+        const htmlRaw = msg.html
+        const html = Array.isArray(htmlRaw) ? htmlRaw.join('\n') : (typeof htmlRaw === 'string' ? htmlRaw : String(msg.text || ''))
+        const hrefs = [...html.matchAll(/href="(https:\/\/[^"]+)"/g)].map(m => m[1].replace(/&amp;/g, '&'))
+        const loose = [...html.matchAll(/https:\/\/auth\.wisprflow\.com\/[^"'\s<]+/g)].map(m => m[0].replace(/&amp;/g, '&'))
+        verifyLink = hrefs.find(l => l.includes('auth.wisprflow.com') && l.includes('verify')) || loose.find(l => l.includes('verify')) || hrefs.find(l => l.includes('verify'))
+        cliLog('MAIL_COUNT:' + msgs['hydra:totalItems'] + ' HREFS:' + hrefs.length)
+        if (verifyLink) {
+          break
+        }
+        cliLog('ERROR:email arrived but no verify link; subject=' + String(msg.subject || ''))
+      }
+    }
+
+    if (verifyLink) {
+      await openOrReuseTab(verifyLink, { wait: true, timeout: 30 })
+      await wait(3)
+      const finalSnap = await snapshotText()
+      const verified = finalSnap.includes('all set') || finalSnap.includes('referral benefits') || finalSnap.includes('Download')
+      cliLog('VERIFIED:' + verified)
+    } else {
+      cliLog('VERIFIED:false')
+      cliLog('ERROR:No verification email received')
+    }
+
+    await completeTaskSpace(TASK_SPACE, { keep: false })
+  } else if (!handedOff) {
+    cliLog('VERIFIED:false')
+    cliLog('ERROR:skipped mail wait; form never reached check-email')
+    await completeTaskSpace(TASK_SPACE, { keep: false })
+  }
+} catch (e) {
+  cliLog('ERROR:' + (e && e.stack ? e.stack.split('\n')[0] : String(e)))
+  cliLog('VERIFIED:false')
 }
 EOF
 }
@@ -187,6 +250,7 @@ save_account() {
   EMAIL=$(echo "$OUTPUT" | grep '^EMAIL:' | tail -1 | cut -d: -f2-)
   PASSWORD=$(echo "$OUTPUT" | grep '^PASSWORD:' | tail -1 | cut -d: -f2-)
   VERIFIED=$(echo "$OUTPUT" | grep '^VERIFIED:' | tail -1 | cut -d: -f2-)
+  VERIFIED="${VERIFIED:-false}"
 
   [ -n "$EMAIL" ] || return 1
 
@@ -215,7 +279,11 @@ FAILED=0
 
 for i in $(seq 1 "$N"); do
   OUTPUT=$(run_signup "$i" 2>&1) || true
-  echo "$OUTPUT" | grep -E '^(EMAIL|PASSWORD|VERIFIED|HAS_|CHECK_|HC_|HANDOFF|ERROR|ACTION):' || true
+  printf '%s\n' "$OUTPUT" > "${DATA_DIR}/last-signup-raw.log"
+  echo "$OUTPUT" | grep -E '(EMAIL|PASSWORD|VERIFIED|HAS_|CHECK_|HC_|HANDOFF|ERROR|ACTION|FULL_NAME|TASK|SUBMIT|NAME_SET|SNAP|MAIL_):' || true
+  if ! echo "$OUTPUT" | grep -q '^VERIFIED:true'; then
+    echo "$OUTPUT" | grep -Ei 'error|exception|timeout|failed|denied' | grep -v '^EMAIL:' | tail -15 || true
+  fi
 
   if echo "$OUTPUT" | grep -q '^EMAIL:'; then
     save_account "$i" "$OUTPUT" || true
@@ -226,6 +294,7 @@ for i in $(seq 1 "$N"); do
     fi
   else
     FAILED=$((FAILED + 1))
+    echo "$OUTPUT" | tail -25
   fi
 
   [ "$i" -lt "$N" ] && sleep 8
