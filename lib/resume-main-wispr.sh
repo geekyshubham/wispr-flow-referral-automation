@@ -7,7 +7,7 @@ main_running() {
 import subprocess, sys
 out = subprocess.check_output(["ps", "-ax", "-o", "command="], text=True)
 for cmd in out.splitlines():
-    if "Wispr Flow.app/Contents/MacOS/Wispr Flow" not in cmd:
+    if not cmd.startswith("/Applications/Wispr Flow.app/Contents/MacOS/Wispr Flow"):
         continue
     if "Helper" in cmd or "swift-helper-app-dist" in cmd:
         continue
@@ -23,7 +23,7 @@ if main_running; then
   exit 0
 fi
 
-open -a "Wispr Flow"
+open -a "/Applications/Wispr Flow.app"
 for _ in 1 2 3 4 5; do
   sleep 1
   if main_running; then

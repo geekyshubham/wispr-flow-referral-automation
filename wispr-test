@@ -1,331 +1,89 @@
 #!/usr/bin/env bash
-# Wispr Flow Account Creator & Dictation Tester
-# Usage: ./wispr-test <N> [--no-dictation]
+# Create/verify accounts, streaming progress and preserving human handoffs.
 set -euo pipefail
-
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DATA_DIR="${SCRIPT_DIR}/data"
-REFERRAL_CODE="${REFERRAL_CODE:-SHUBHAM2270}"
-SIGNUP_URL="https://wisprflow.ai/r?${REFERRAL_CODE}"
-TARGET_WORDS="${TARGET_WORDS:-2100}"
+source "${SCRIPT_DIR}/lib/env.sh"
+if ! python3 "${SCRIPT_DIR}/lib/job-lock.py" --is-held "$SCRIPT_DIR"; then
+  exec python3 "${SCRIPT_DIR}/lib/job-lock.py" "$SCRIPT_DIR" "${SCRIPT_DIR}/wispr-test" "$@"
+fi
 N=1
 SKIP_DICTATION=false
-
+FRESH="${WISPR_FRESH_SIGNUP:-0}"
 for arg in "$@"; do
   case "$arg" in
     --no-dictation) SKIP_DICTATION=true ;;
+    --fresh) FRESH=1 ;;
     [0-9]*) N="$arg" ;;
+    *) echo "Usage: $0 <N> [--no-dictation] [--fresh]"; exit 1 ;;
   esac
 done
-
-if ! [[ "$N" =~ ^[0-9]+$ ]] || [ "$N" -lt 1 ]; then
-  echo "Usage: $0 <N> [--no-dictation]"
-  exit 1
+[[ "$N" =~ ^[0-9]+$ ]] && [ "$N" -gt 0 ] || exit 1
+if [ "$FRESH" = "1" ]; then
+  node "${SCRIPT_DIR}/lib/referral-status.mjs" "$SCRIPT_DIR/data/pending-signup.json" --fresh "${REFERRAL_CODE:-SHUBHAM3680}"
+else
+  node "${SCRIPT_DIR}/lib/referral-status.mjs" "$SCRIPT_DIR/data/pending-signup.json"
 fi
-
-mkdir -p "$DATA_DIR"
-ACCOUNTS_FILE="${DATA_DIR}/accounts.json"
-[ -f "$ACCOUNTS_FILE" ] || echo "[]" > "$ACCOUNTS_FILE"
-
-echo "============================================"
-echo "  Wispr Flow Account Creator (ego-browser)"
-echo "  Referral: ${REFERRAL_CODE}"
-echo "  Creating ${N} account(s)..."
-echo "============================================"
-
-run_signup() {
-  local INDEX="$1"
-  local TASK_SPACE="wispr-account-${INDEX}-$(date +%s)"
-
-  echo ""
-  echo "--- Account ${INDEX}/${N} ---"
-  echo "  Task space: ${TASK_SPACE}"
-
-  # ego-browser does not pass process.env into the script. Inject constants
-  # with Python JSON so the heredoc can stay free of JS backticks.
-  local HEADER
-  HEADER=$(python3 -c 'import json,sys; print("const INDEX = %d;\nconst SIGNUP_URL = %s;\nconst TASK_SPACE = %s;" % (int(sys.argv[1]), json.dumps(sys.argv[2]), json.dumps(sys.argv[3])))' "$INDEX" "$SIGNUP_URL" "$TASK_SPACE")
-
-  ego-browser nodejs <<EOF
+python3 "${SCRIPT_DIR}/lib/check-network.py" "${MAIL_PROVIDER:-maildrop}"
+mkdir -p "${SCRIPT_DIR}/data"
+for ((i=1; i<=N; i++)); do
+  HEADER=$(python3 - "$SCRIPT_DIR" "$i" "$N" "$SKIP_DICTATION" "$FRESH" <<'PYCONFIG'
+import json, os, sys
+from pathlib import Path
+root, index, count, skip, fresh = sys.argv[1:]
+space = os.environ.get("WISPR_TASK_SPACE", "wispr-signup")
+config = dict(dataDir=root + "/data", index=int(index),
+              mailProvider=os.environ.get('MAIL_PROVIDER', 'maildrop'),
+              mailWaitSeconds=int(os.environ.get('MAIL_WAIT_SECONDS', '0')),
+              referralCode=os.environ.get("REFERRAL_CODE", "SHUBHAM3680"),
+              targetWords=int(os.environ.get("TARGET_WORDS", "2100")),
+              remainingAccounts=int(os.environ.get("REMAINING_ACCOUNTS", str(int(count) - int(index) + 1))),
+              skipDictation=skip == 'true' and os.environ.get('WISPR_BATCH_DICTATION') != '1',
+              requireReferral=os.environ.get('REQUIRE_REFERRAL') == '1' or os.environ.get('WISPR_BATCH_DICTATION') == '1',
+              continueBatch=int(index) > 1 or os.environ.get('WISPR_CONTINUE_BATCH') == '1',
+              fresh=fresh == '1',
+              taskSpace=int(space) if space.isdigit() else space)
+print("const config = " + json.dumps(config) + ";")
+print("const moduleUrl = " + json.dumps(Path(root, "lib/web-auth.mjs").as_uri()) + ";")
+PYCONFIG
+)
+  STATUS=0
+  ego-browser nodejs <<EOF | tee "${SCRIPT_DIR}/data/last-signup-raw.log" || STATUS=$?
 ${HEADER}
-cliLog('TASK:' + TASK_SPACE)
-
-try {
-  if (!SIGNUP_URL || !TASK_SPACE) {
-    throw new Error('missing SIGNUP_URL or TASK_SPACE')
-  }
-
-  const task = await useOrCreateTaskSpace(TASK_SPACE)
-  await cdp('Network.clearBrowserCookies', {})
-
-  const domains = JSON.parse(await serverFetch('https://api.mail.tm/domains'))
-  const domain = domains['hydra:member'][0].domain
-  const email = 'flow' + Math.floor(Math.random() * 900000 + 100000) + '@' + domain
-  const password = 'FlowTest2026!'
-
-  const created = await serverFetch('https://api.mail.tm/accounts', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ address: email, password })
-  })
-  cliLog('MAIL_CREATE:' + String(created).slice(0, 120))
-  const tokenData = JSON.parse(await serverFetch('https://api.mail.tm/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ address: email, password })
-  }))
-  const mailToken = tokenData.token
-  if (!mailToken) throw new Error('mail.tm token failed: ' + JSON.stringify(tokenData).slice(0, 200))
-  cliLog('EMAIL:' + email)
-  cliLog('PASSWORD:' + password)
-
-  await openOrReuseTab(SIGNUP_URL, { wait: true, timeout: 30 })
-  await wait(2)
-
-  try {
-    const snap0 = await snapshotText()
-    const okRef = snap0.match(/button \[ref=(\d+).*?\n\s*text "OK"/s)?.[1]
-    if (okRef) await click('@' + okRef, { label: 'privacy OK' })
-  } catch (e) {}
-
-  await fillInput('input[name="email"]', email, { label: 'enter email' })
-
-  for (let t = 0; t < 25; t++) {
-    await wait(1)
-    const tokenLen = await js('(() => document.querySelector("input[name=cf-turnstile-response]")?.value?.length || 0)()')
-    if (tokenLen > 100) break
-  }
-
-  await wait(2)
-  let snap = await snapshotText()
-  let btnRef = snap.match(/button \[ref=(\d+)/)?.[1]
-  if (btnRef) await click('@' + btnRef, { label: 'continue email step' })
-  await wait(5)
-
-  snap = await snapshotText()
-  if (!snap.includes('Password')) {
-    btnRef = snap.match(/button \[ref=(\d+)/)?.[1]
-    if (btnRef) await click('@' + btnRef, { label: 'continue email retry' })
-    await wait(5)
-    snap = await snapshotText()
-  }
-  cliLog('HAS_PASSWORD:' + snap.includes('Password'))
-
-  const FIRST = ['Alex', 'Jordan', 'Taylor', 'Morgan', 'Riley', 'Casey', 'Avery', 'Quinn']
-  const LAST = ['Rivera', 'Patel', 'Nguyen', 'Brooks', 'Walker', 'Bennett', 'Hayes', 'Foster']
-  const fullName = FIRST[(INDEX - 1 + FIRST.length) % FIRST.length] + ' ' + LAST[Math.floor(Math.random() * LAST.length)]
-
-  const setName = async (name) => {
-    const written = await js(
-      '(() => { const el = document.querySelector("input[name=Full-name]"); if (!el) return "NO_EL"; el.focus(); const d = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value"); const v = ' +
-        JSON.stringify(name) +
-        '; if (d && d.set) d.set.call(el, v); else el.value = v; el.dispatchEvent(new Event("input", { bubbles: true })); el.dispatchEvent(new Event("change", { bubbles: true })); return el.value; })()'
-    )
-    cliLog('NAME_SET:' + written)
-    return written
-  }
-
-  const clickContinue = async () => {
-    const how = await js('(() => { const btn = [...document.querySelectorAll("button")].find(b => /continue/i.test((b.innerText || b.textContent || "").trim())); const f = document.querySelector("form"); if (btn) { btn.click(); if (f && f.requestSubmit) { try { f.requestSubmit(btn) } catch (e) { f.requestSubmit() } } return "clicked"; } if (f && f.requestSubmit) { f.requestSubmit(); return "requestSubmit"; } if (f) { f.submit(); return "submit"; } return "no-button"; })()')
-    cliLog('SUBMIT:' + how)
-    return how
-  }
-
-  let handedOff = false
-  if (snap.includes('Password')) {
-    await fillInput('input[name="Password"]', password, { label: 'password' })
-    cliLog('FULL_NAME:' + fullName)
-    await setName(fullName)
-    await wait(1)
-
-    snap = await snapshotText()
-    if (snap.includes('numbers')) {
-      await setName('Alex Rivera')
-      await wait(1)
-      snap = await snapshotText()
-    }
-
-    const hcRef = snap.match(/iframe \[ref=(\d+)/)?.[1]
-    const boxRef = snap.match(/checkbox \[ref=(\d+)/)?.[1]
-    if (boxRef) {
-      try { await click('@' + boxRef, { label: 'hcaptcha checkbox' }) } catch (e) {}
-    } else if (hcRef) {
-      try { await click('@' + hcRef, { label: 'hcaptcha' }) } catch (e) {}
-    }
-    await wait(8)
-
-    let hcLen = 0
-    for (let h = 0; h < 20; h++) {
-      hcLen = await js('(() => document.querySelector("textarea[name=h-captcha-response]")?.value?.length || 0)()')
-      if (hcLen > 10) break
-      if (h === 5) {
-        const again = (await snapshotText()).match(/checkbox \[ref=(\d+)/)?.[1] || hcRef
-        if (again) { try { await click('@' + again, { label: 'hcaptcha retry' }) } catch (e) {} }
-      }
-      await wait(2)
-    }
-    cliLog('HC_TOKEN_LEN:' + hcLen)
-
-    if (hcLen <= 10) {
-      cliLog('HANDOFF:Please click the hCaptcha checkbox in ego lite, then: ./wispr-resume ' + TASK_SPACE)
-      await handOffTaskSpace(TASK_SPACE)
-      cliLog('VERIFIED:false')
-      cliLog('ERROR:hCaptcha requires a human click — Wispr requires it on web signup')
-      handedOff = true
-    } else {
-      await clickContinue()
-      await wait(6)
-      snap = await snapshotText()
-      if (snap.includes('numbers')) {
-        await setName('Alex Rivera')
-        await wait(1)
-        await clickContinue()
-        await wait(6)
-        snap = await snapshotText()
-      }
-      cliLog('CHECK_EMAIL_SCREEN:' + snap.includes('Check your email'))
-      if (!snap.includes('Check your email')) {
-        cliLog('ERROR:Continue did not submit')
-        cliLog('SNAP:' + snap.replace(/\n/g, ' ').slice(0, 400))
-      }
-    }
-  } else {
-    cliLog('ERROR:Never reached password step')
-    cliLog('SNAP:' + snap.replace(/\n/g, ' ').slice(0, 400))
-  }
-
-  if (!handedOff && snap && snap.includes('Check your email')) {
-    let verifyLink = null
-    for (let i = 0; i < 30; i++) {
-      await wait(2)
-      const msgs = JSON.parse(await serverFetch('https://api.mail.tm/messages', {
-        headers: { Authorization: 'Bearer ' + mailToken }
-      }))
-      if (msgs['hydra:totalItems'] > 0) {
-        const msg = JSON.parse(await serverFetch('https://api.mail.tm/messages/' + msgs['hydra:member'][0].id, {
-          headers: { Authorization: 'Bearer ' + mailToken }
-        }))
-        const htmlRaw = msg.html
-        const html = Array.isArray(htmlRaw) ? htmlRaw.join('\n') : (typeof htmlRaw === 'string' ? htmlRaw : String(msg.text || ''))
-        const hrefs = [...html.matchAll(/href="(https:\/\/[^"]+)"/g)].map(m => m[1].replace(/&amp;/g, '&'))
-        const loose = [...html.matchAll(/https:\/\/auth\.wisprflow\.com\/[^"'\s<]+/g)].map(m => m[0].replace(/&amp;/g, '&'))
-        verifyLink = hrefs.find(l => l.includes('auth.wisprflow.com') && l.includes('verify')) || loose.find(l => l.includes('verify')) || hrefs.find(l => l.includes('verify'))
-        cliLog('MAIL_COUNT:' + msgs['hydra:totalItems'] + ' HREFS:' + hrefs.length)
-        if (verifyLink) {
-          break
-        }
-        cliLog('ERROR:email arrived but no verify link; subject=' + String(msg.subject || ''))
-      }
-    }
-
-    if (verifyLink) {
-      await openOrReuseTab(verifyLink, { wait: true, timeout: 30 })
-      await wait(3)
-      const finalSnap = await snapshotText()
-      const verified = finalSnap.includes('all set') || finalSnap.includes('referral benefits') || finalSnap.includes('Download')
-      cliLog('VERIFIED:' + verified)
-    } else {
-      cliLog('VERIFIED:false')
-      cliLog('ERROR:No verification email received')
-    }
-
-    await completeTaskSpace(TASK_SPACE, { keep: false })
-  } else if (!handedOff) {
-    cliLog('VERIFIED:false')
-    cliLog('ERROR:skipped mail wait; form never reached check-email')
-    await completeTaskSpace(TASK_SPACE, { keep: false })
-  }
-} catch (e) {
-  cliLog('ERROR:' + (e && e.stack ? e.stack.split('\n')[0] : String(e)))
-  cliLog('VERIFIED:false')
+const { runSignup, readJson } = await import(moduleUrl);
+const pending = await readJson(config.dataDir + '/pending-signup.json');
+if (!config.fresh && pending && (!pending.completed || (pending.remainingAccounts > 0 && !config.continueBatch))) {
+  console.log('ERROR:An unfinished account/batch is saved. Continue it with ./wispr-resume, or use --fresh to archive it and start with a NEW email.');
+  process.exitCode = 75;
+} else {
+  const task = await taskSpace(config.taskSpace);
+  process.exitCode = await runSignup(config, task);
 }
 EOF
-}
-
-save_account() {
-  local INDEX="$1"
-  local OUTPUT="$2"
-  local EMAIL PASSWORD VERIFIED
-
-  EMAIL=$(echo "$OUTPUT" | grep '^EMAIL:' | tail -1 | cut -d: -f2-)
-  PASSWORD=$(echo "$OUTPUT" | grep '^PASSWORD:' | tail -1 | cut -d: -f2-)
-  VERIFIED=$(echo "$OUTPUT" | grep '^VERIFIED:' | tail -1 | cut -d: -f2-)
-  VERIFIED="${VERIFIED:-false}"
-
-  [ -n "$EMAIL" ] || return 1
-
-  python3 - "$ACCOUNTS_FILE" "$EMAIL" "$PASSWORD" "$VERIFIED" "$INDEX" "$REFERRAL_CODE" <<'PY'
+  [ "$STATUS" -eq 0 ] || exit "$STATUS"
+  if [ "$SKIP_DICTATION" = false ]; then
+    FIELDS=$(python3 - "$SCRIPT_DIR/data/pending-signup.json" <<'PYFIELDS'
 import json, sys
-from datetime import datetime, timezone
-path, email, password, verified, index, referral = sys.argv[1:7]
-with open(path) as f:
-    accounts = json.load(f)
-accounts.append({
-    "index": int(index),
-    "email": email,
-    "password": password,
-    "verified": verified.lower() == "true",
-    "referralCode": referral,
-    "createdAt": datetime.now(timezone.utc).isoformat()
-})
-with open(path, "w") as f:
-    json.dump(accounts, f, indent=2)
-print(f"  Saved: {email} (verified={verified})")
-PY
-}
-
-CREATED=0
-FAILED=0
-
-for i in $(seq 1 "$N"); do
-  OUTPUT=$(run_signup "$i" 2>&1) || true
-  printf '%s\n' "$OUTPUT" > "${DATA_DIR}/last-signup-raw.log"
-  echo "$OUTPUT" | grep -E '(EMAIL|PASSWORD|VERIFIED|HAS_|CHECK_|HC_|HANDOFF|ERROR|ACTION|FULL_NAME|TASK|SUBMIT|NAME_SET|SNAP|MAIL_):' || true
-  if ! echo "$OUTPUT" | grep -q '^VERIFIED:true'; then
-    echo "$OUTPUT" | grep -Ei 'error|exception|timeout|failed|denied' | grep -v '^EMAIL:' | tail -15 || true
+p = json.load(open(sys.argv[1]))
+print(p['email'] + "\t" + p['password'])
+PYFIELDS
+)
+    IFS=$'\t' read -r EMAIL PASSWORD <<< "$FIELDS"
+    "${SCRIPT_DIR}/wispr-complete-flow" "$EMAIL" "$PASSWORD"
   fi
-
-  if echo "$OUTPUT" | grep -q '^EMAIL:'; then
-    save_account "$i" "$OUTPUT" || true
-    if echo "$OUTPUT" | grep -q 'VERIFIED:true'; then
-      CREATED=$((CREATED + 1))
-    else
-      FAILED=$((FAILED + 1))
-    fi
-  else
-    FAILED=$((FAILED + 1))
-    echo "$OUTPUT" | tail -25
+  if [ "${WISPR_BATCH_DICTATION:-0}" != "1" ]; then
+    python3 - "$SCRIPT_DIR/data/pending-signup.json" "$((N - i))" <<'PYCOMPLETE'
+import json, os, sys, tempfile
+path, remaining = sys.argv[1:]
+with open(path) as stream:
+    pending = json.load(stream)
+pending.update(completed=True, remainingAccounts=int(remaining))
+fd, temporary = tempfile.mkstemp(dir=os.path.dirname(path), prefix='.pending-')
+with os.fdopen(fd, 'w') as stream:
+    json.dump(pending, stream, indent=2)
+os.replace(temporary, path)
+PYCOMPLETE
   fi
-
-  [ "$i" -lt "$N" ] && sleep 8
 done
-
-echo ""
-echo "============================================"
-echo "  Summary: ${CREATED}/${N} verified, ${FAILED} failed"
-echo "  Accounts: ${ACCOUNTS_FILE}"
-echo "============================================"
-
-if [ "$CREATED" -gt 0 ] && [ "$SKIP_DICTATION" = false ]; then
-  echo ""
-  echo "Starting isolated Wispr login + ${TARGET_WORDS:-2100}-word dictation for verified accounts..."
-  python3 - "$ACCOUNTS_FILE" "$SCRIPT_DIR" "${TARGET_WORDS:-2100}" <<'PY'
-import json, os, subprocess, sys
-path, root, target = sys.argv[1:4]
-with open(path) as f:
-    accounts = json.load(f)
-verified = [a for a in accounts if a.get("verified")]
-if not verified:
-    sys.exit(0)
-a = verified[-1]
-env = os.environ.copy()
-env["TARGET_WORDS"] = target
-sys.exit(subprocess.call([os.path.join(root, "wispr-complete-flow"), a["email"], a["password"]], env=env))
-PY
-elif [ "$SKIP_DICTATION" = true ]; then
-  echo "Dictation skipped (--no-dictation). Next: ./wispr-complete-flow <email> <password>"
-else
-  echo "Dictation skipped (no verified accounts). If hCaptcha handed off, run ./wispr-resume <task-space>."
+if [ "${WISPR_BATCH_DICTATION:-0}" != "1" ]; then
+  bash "${SCRIPT_DIR}/lib/close-ego-wispr-spaces.sh"
 fi
-
-echo "Done."

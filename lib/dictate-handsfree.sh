@@ -5,6 +5,8 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib/env.sh"
 PROFILE_DIR="${1:?profile dir required}"
 TARGET="${2:-2000}"
 TEXT_FILE="${SCRIPT_DIR}/lib/dictation-text.txt"
@@ -56,7 +58,7 @@ launch_isolated() {
   after=$(log_lines)
   open "wispr-flow://switch-mic?mic_name=BlackHole%202ch%20(Virtual)"
   sleep 2
-  if tail -n +"$((after + 1))" "$LOG" | rg -q "No audio devices available"; then
+  if tail -n +"$((after + 1))" "$LOG" | grep -F -q "No audio devices available"; then
     echo "  Audio devices not ready — retrying mic switch in 8s..."
     sleep 8
     after=$(log_lines)
@@ -77,7 +79,7 @@ start_listening() {
     echo "  Listening"
     return 0
   fi
-  if tail -n +"$((after + 1))" "$LOG" | rg -q "Helper was not ready"; then
+  if tail -n +"$((after + 1))" "$LOG" | grep -F -q "Helper was not ready"; then
     echo "  Helper not ready — waiting 10s and retrying start..."
     sleep 10
     after=$(log_lines)
@@ -108,7 +110,7 @@ dictate_phrase() {
   after=$(log_lines)
   open "wispr-flow://stop-hands-free"
   if wait_log "Text lengths - ASR:" "$after" 40; then
-    tail -n +"$((after + 1))" "$LOG" | rg "Text lengths - ASR:" | tail -1
+    tail -n +"$((after + 1))" "$LOG" | grep -F "Text lengths - ASR:" | tail -1
     return 0
   fi
   echo "  No ASR result after stop"

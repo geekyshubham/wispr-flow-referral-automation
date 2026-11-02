@@ -5,6 +5,8 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib/env.sh"
 PROFILE_DIR="${1:?profile dir required}"
 TARGET="${2:-2100}"
 LOG="${SCRIPT_DIR}/data/isolated-wispr.log"
@@ -49,7 +51,7 @@ while true; do
   fi
 
   if echo "$PARSE" | python3 -c "import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get('saw_503') else 1)" 2>/dev/null; then
-    if tail -n 80 "$LOG" | rg -q "Too many concurrent requests"; then
+    if tail -n 80 "$LOG" | grep -F -q "Too many concurrent requests"; then
       echo "  503 cooldown — sleeping 45s"
       sleep 45
       continue

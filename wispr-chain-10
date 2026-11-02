@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Explicitly finish saved accounts, then run a sequential new-account batch.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/env.sh"
+if [ "${1:-}" = "--help" ]; then
+  echo "Usage: $0 [new-accounts [words]] (defaults: 10, 2100)"
+  exit 0
+fi
+[ "$#" -le 2 ] || { echo "Too many arguments. Use --help."; exit 1; }
+ACCOUNTS="${1:-10}"
+WORDS="${2:-${WORDS:-${TARGET_WORDS:-2100}}}"
+[[ "$ACCOUNTS" =~ ^[0-9]+$ ]] && [ "$ACCOUNTS" -gt 0 ] || { echo "new-accounts must be positive"; exit 1; }
+[[ "$WORDS" =~ ^[0-9]+$ ]] && [ "$WORDS" -gt 0 ] || { echo "words must be positive"; exit 1; }
+if ! python3 "$SCRIPT_DIR/lib/job-lock.py" --is-held "$SCRIPT_DIR"; then
+  exec python3 "$SCRIPT_DIR/lib/job-lock.py" "$SCRIPT_DIR" "$SCRIPT_DIR/wispr-chain-10" "$@"
+fi
+echo "Phase 1: finishing existing saved accounts..."
+"$SCRIPT_DIR/wispr-refer-pending" --foreground --words "$WORDS"
+echo "Phase 2: running $ACCOUNTS explicitly requested new accounts..."
+"$SCRIPT_DIR/wispr-run" --accounts "$ACCOUNTS" --words "$WORDS" --foreground
+echo "Chain complete."

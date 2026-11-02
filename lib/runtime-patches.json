@@ -1,0 +1,24 @@
+{
+  "original_app": "/Applications/Wispr Flow.app",
+  "original_asar_sha256": "19a20ebd08fa9cec5e119f6cd1f25c60d41839fc20bf594276650ff8ffc608d5",
+  "original_info_plist_sha256": "d3a5e01c280173c88840b6ea315f441ea8371643bc288c58e6176192c5f36974",
+  "app_version": "1.6.1337",
+  "main_sha256": "f88e6e4738e21fa4031c32572185e716ce5bf469576927b691f017b9b47976b4",
+  "patches": [
+    {
+      "name": "isolated_log_root",
+      "old": "f=u?o().join(i().homedir(),\"AppData\",\"Roaming\",\"Wispr Flow\",\"Logs\"):o().join(i().homedir(),\"Library\",\"Logs\",\"Wispr Flow\")",
+      "new": "f=require(\"node:path\").join(require(\"electron\").app.getPath(\"userData\"),\"logs\")"
+    },
+    {
+      "name": "isolated_support_root_and_electron_logs",
+      "old": "g=(u?o().join(i().homedir(),\"AppData\",\"Roaming\",\"Wispr Flow\",\"session.json\"):o().join(i().homedir(),\"Library\",\"Application Support\",\"Wispr Flow\",\"session.json\"),u?o().join(process.env.APPDATA||\"\",\"Wispr Flow\"):o().join(i().homedir(),\"Library\",\"Application Support\",\"Wispr Flow\"))",
+      "new": "g=(()=>{const a=require(\"electron\").app,p=a.commandLine.getSwitchValue(\"user-data-dir\");if(!p||!process.argv.some((v,i)=>v===\"--user-data-dir=\"+p||v===\"--user-data-dir\"&&process.argv[i+1]===p)||a.getPath(\"userData\")!==p)return a.exit(78);a.setAppLogsPath(f);return p})()"
+    },
+    {
+      "name": "isolated_legacy_migration_root",
+      "old": "l=c.H8?a().join(process.env.APPDATA||\"\",\"Flow\"):a().join(s().homedir(),\"Library\",\"Application Support\",\"Flow\")",
+      "new": "l=require(\"node:path\").join(require(\"electron\").app.getPath(\"userData\"),\"legacy-Flow\")"
+    }
+  ]
+}

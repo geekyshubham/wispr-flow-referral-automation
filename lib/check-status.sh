@@ -31,7 +31,12 @@ except FileNotFoundError:
 try:
     with open(session_path) as f:
         sess = json.load(f)
-    token = json.loads(sess["sb-dodjkfqhwrzqjwkfnthl-auth-token"])
+    if sess.get("authProviderId") == "workos":
+        workos = sess["workosSession"]
+        token = {"expires_at": workos.get("expiresAt"), "user": {"email": workos.get("email")}}
+        print("Auth provider: WorkOS")
+    else:
+        token = json.loads(sess["sb-dodjkfqhwrzqjwkfnthl-auth-token"])
     exp = token.get("expires_at")
     if exp:
         exp_dt = datetime.fromtimestamp(exp, tz=timezone.utc)

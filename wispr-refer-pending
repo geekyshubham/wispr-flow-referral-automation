@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# Complete existing verified accounts only; never create accounts here.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/env.sh"
+ORIGINAL_ARGS=("$@")
+WORDS_EXPLICIT=0
+if [ -n "${WORDS+x}" ] || [ -n "${TARGET_WORDS+x}" ]; then WORDS_EXPLICIT=1; fi
+WORDS="${WORDS:-${TARGET_WORDS:-2100}}"
+FOREGROUND="${FOREGROUND:-0}"
+PENDING=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --words|-w) WORDS="${2:?words required}"; WORDS_EXPLICIT=1; shift 2 ;;
+    --foreground|--fg) FOREGROUND=1; shift ;;
+    --file|-f)
+      while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%%#*}"
+        line="$(printf '%s' "$line" | tr -d '[:space:]')"
+        [ -z "$line" ] || PENDING+=("$line")
+      done < "${2:?file required}"
+      shift 2 ;;
+    --help|-h)
+      echo "Usage: $0 [--words W] [--foreground] [--file list.txt] [email ...]"
+      echo "No emails: resumes its saved list, or selects verified saved accounts below the requested target."
+      echo "Passwords must be saved in accounts.json, or supplied explicitly through DEFAULT_PASS."
+      exit 0 ;;
+    --*) echo "Unknown option: $1"; exit 1 ;;
+    *) PENDING+=("$1"); shift ;;
+  esac
+done
+[[ "$WORDS" =~ ^[0-9]+$ ]] && [ "$WORDS" -gt 0 ] || { echo "words must be a positive integer"; exit 1; }
+if python3 "$SCRIPT_DIR/lib/job-lock.py" --is-held "$SCRIPT_DIR"; then FOREGROUND=1; fi
+if [ "$FOREGROUND" != "1" ]; then
+  exec python3 "$SCRIPT_DIR/lib/job-lock.py" --detach "$SCRIPT_DIR" "$SCRIPT_DIR/wispr-refer-pending" --foreground "${ORIGINAL_ARGS[@]}"
+fi
+if ! python3 "$SCRIPT_DIR/lib/job-lock.py" --is-held "$SCRIPT_DIR"; then
+  exec python3 "$SCRIPT_DIR/lib/job-lock.py" "$SCRIPT_DIR" "$SCRIPT_DIR/wispr-refer-pending" --foreground "${ORIGINAL_ARGS[@]}"
+fi
+export SKIP_RESUME_MAIN=1
+WISPR_RUN_TOKEN="$$-$(date +%s)"
+export WISPR_RUN_TOKEN
+mkdir -p "$SCRIPT_DIR/data"
+printf '%s\n' "$WISPR_RUN_TOKEN" > "$SCRIPT_DIR/data/wispr-run-token"
+restore_all() {
+  [ "$(cat "$SCRIPT_DIR/data/wispr-run-token" 2>/dev/null || true)" = "$WISPR_RUN_TOKEN" ] || return 0
+  bash "$SCRIPT_DIR/lib/cleanup-all.sh" 2>/dev/null || true
+}
+trap restore_all EXIT
+bash "$SCRIPT_DIR/lib/restore-audio.sh" save 2>/dev/null || true
+python3 - "$SCRIPT_DIR" "$WORDS" "$WORDS_EXPLICIT" "${PENDING[@]}" <<'PY'
+import json, os, subprocess, sys, tempfile
+from pathlib import Path
+root, words, words_explicit, *requested = sys.argv[1:]
+root = Path(root)
+data = root / 'data'
+state_path = data / 'pending-referrals.json'
+
+
+def load(path, default):
+    return json.loads(path.read_text()) if path.exists() else default
+
+
+def save(path, value):
+    fd, temporary = tempfile.mkstemp(dir=data, prefix='.pending-referrals-')
+    with os.fdopen(fd, 'w') as stream:
+        json.dump(value, stream, indent=2)
+    os.replace(temporary, path)
+
+
+words = int(words)
+old = load(state_path, {})
+accounts = load(data / 'accounts.json', [])
+completions = load(data / 'completions.json', [])
+if old and not old.get('completed'):
+    if requested and [e.lower() for e in requested] != [a['email'].lower() for a in old['accounts']]:
+        raise SystemExit('ERROR: A different unfinished pending list is saved. Resume it without email arguments first.')
+    state = old
+    if words_explicit == '1' and words != state['words']:
+        state.update(words=words, nextIndex=0)
+    words = state['words']
+else:
+    confirmed = {c.get('email', '').lower() for c in completions if c.get('serverConfirmed') is True and int(c.get('serverTotalWords') or 0) >= words}
+    if not requested:
+        requested = [a['email'] for a in accounts if a.get('verified') and a.get('email', '').lower() not in confirmed]
+    requested = list(dict.fromkeys(e.lower() for e in requested))
+    selected = []
+    for email in requested:
+        account = next((a for a in accounts if a.get('email', '').lower() == email), {})
+        password = account.get('password') or os.environ.get('DEFAULT_PASS')
+        if not password:
+            raise SystemExit('ERROR: No saved password for ' + email + '. No account was attempted.')
+        if '@' not in email or any(c.isspace() for c in email):
+            raise SystemExit('ERROR: Invalid account email: ' + email)
+        selected.append(dict(email=account.get('email') or email, password=password))
+    state = dict(words=words, accounts=selected, nextIndex=0, completed=False)
+save(state_path, state)
+if not state['accounts']:
+    state['completed'] = True
+    save(state_path, state)
+    print('No verified saved accounts need work at the requested target.')
+    raise SystemExit(0)
+lock_fd = int(os.environ['WISPR_JOB_LOCK_FD'])
+for index in range(state.get('nextIndex', 0), len(state['accounts'])):
+    account = state['accounts'][index]
+    print(f"Existing account {index + 1}/{len(state['accounts'])}: {account['email']} (target {words} server words)", flush=True)
+    env = os.environ.copy()
+    env.update(TARGET_WORDS=str(words), WORDS=str(words))
+    result = subprocess.run([str(root / 'wispr-complete-flow'), account['email'], account['password']], env=env, pass_fds=(lock_fd,))
+    if result.returncode:
+        print('ERROR: Stopped at the failed account. Profile and pending list are preserved. Resume: ./wispr-refer-pending --foreground', flush=True)
+        raise SystemExit(result.returncode if result.returncode > 0 else 128 - result.returncode)
+    state['nextIndex'] = index + 1
+    save(state_path, state)
+    pending_path = data / 'pending-signup.json'
+    pending = load(pending_path, {})
+    if (pending.get('email', '').lower() == account['email'].lower() and not pending.get('completed')
+            and pending.get('verified') and int(pending.get('targetWords', words)) <= words):
+        pending.update(completed=True, remainingAccounts=max(0, int(pending.get('remainingAccounts', 1)) - 1))
+        save(pending_path, pending)
+state['completed'] = True
+save(state_path, state)
+print(f"DONE: {len(state['accounts'])} existing accounts reached the requested server-word target.")
+PY

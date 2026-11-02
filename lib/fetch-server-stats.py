@@ -23,6 +23,9 @@ def access_token_from_session(session_obj: object) -> str | None:
         session_obj = json.loads(session_obj)
     if not isinstance(session_obj, dict):
         return None
+    workos = session_obj.get("workosSession")
+    if isinstance(workos, dict):
+        return workos.get("accessToken")
     raw = session_obj.get("sb-dodjkfqhwrzqjwkfnthl-auth-token", session_obj)
     if isinstance(raw, str):
         try:
@@ -60,11 +63,11 @@ def load_token(argv: list[str]) -> str:
     return tok
 
 
-def get_stats(token: str) -> tuple[int, dict]:
+def get_stats(token: str, url: str = STATS_URL) -> tuple[int, dict]:
     last_err = None
     for auth in (token, f"Bearer {token}"):
         req = urllib.request.Request(
-            STATS_URL,
+            url,
             headers={
                 "Authorization": auth,
                 "Content-Type": "application/json",
@@ -102,9 +105,14 @@ def total_words(payload: dict) -> int:
 
 if __name__ == "__main__":
     quiet = "--quiet" in sys.argv
-    argv = [a for a in sys.argv if a != "--quiet"]
+    referral = "--referral" in sys.argv
+    argv = [a for a in sys.argv if a not in ("--quiet", "--referral")]
     token = load_token(argv)
-    status, payload = get_stats(token)
+    status, payload = get_stats(token, "https://api.wisprflow.ai/api/v1/referral/" if referral else STATS_URL)
+    if referral:
+        associated = bool(payload.get("referer_name"))
+        print(int(associated) if quiet else json.dumps({"http": status, "referralAssociated": associated}))
+        sys.exit(0)
     words = total_words(payload)
     out = {
         "http": status,

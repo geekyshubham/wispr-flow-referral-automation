@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Resume saved work, or explicitly finish an account before a requested new batch.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIR/lib/env.sh"
+ORIGINAL_ARGS=("$@")
+FOREGROUND="${FOREGROUND:-0}"
+POSITIONAL=()
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --foreground|--fg) FOREGROUND=1; shift ;;
+    --help|-h)
+      echo "Usage: $0 [email [new-accounts]] [--foreground]"
+      echo "No email: resumes the saved batch. Passwords come from accounts.json or explicit PARTIAL_PASS."
+      exit 0 ;;
+    --*) echo "Unknown option: $1"; exit 1 ;;
+    *) POSITIONAL+=("$1"); shift ;;
+  esac
+done
+if [ "${#POSITIONAL[@]}" -eq 0 ]; then
+  exec "$SCRIPT_DIR/wispr-resume"
+fi
+[ "${#POSITIONAL[@]}" -le 2 ] || { echo "Too many arguments. Use --help."; exit 1; }
+EMAIL="${POSITIONAL[0]}"
+REMAINING="${POSITIONAL[1]:-0}"
+WORDS="${WORDS:-${TARGET_WORDS:-2100}}"
+[[ "$REMAINING" =~ ^[0-9]+$ ]] || { echo "new-accounts must be a non-negative integer"; exit 1; }
+[[ "$WORDS" =~ ^[0-9]+$ ]] && [ "$WORDS" -gt 0 ] || { echo "words must be a positive integer"; exit 1; }
+if python3 "$SCRIPT_DIR/lib/job-lock.py" --is-held "$SCRIPT_DIR"; then FOREGROUND=1; fi
+if [ "$FOREGROUND" != "1" ]; then
+  exec python3 "$SCRIPT_DIR/lib/job-lock.py" --detach "$SCRIPT_DIR" "$SCRIPT_DIR/wispr-continue" --foreground "${ORIGINAL_ARGS[@]}"
+fi
+if ! python3 "$SCRIPT_DIR/lib/job-lock.py" --is-held "$SCRIPT_DIR"; then
+  exec python3 "$SCRIPT_DIR/lib/job-lock.py" "$SCRIPT_DIR" "$SCRIPT_DIR/wispr-continue" --foreground "${ORIGINAL_ARGS[@]}"
+fi
+# Checkpoint before work so a failed account is resumed rather than replaced.
+PASSWORD=$(python3 - "$SCRIPT_DIR" "$EMAIL" "$REMAINING" "$WORDS" <<'PY'
+import json, os, sys, tempfile
+from pathlib import Path
+root, email, remaining, words = sys.argv[1:]
+data = Path(root, 'data')
+data.mkdir(parents=True, exist_ok=True)
+path = data / 'pending-signup.json'
+pending = json.loads(path.read_text()) if path.exists() else {}
+if pending and (not pending.get('completed') or pending.get('remainingAccounts', 0) > 0) and pending.get('email', '').lower() != email.lower():
+    raise SystemExit('ERROR: Another unfinished account/batch is saved. Use ./wispr-resume first.')
+accounts_path = data / 'accounts.json'
+accounts = json.loads(accounts_path.read_text()) if accounts_path.exists() else []
+account = next((a for a in accounts if a.get('email', '').lower() == email.lower()), {})
+password = os.environ.get('PARTIAL_PASS') or account.get('password') or (pending.get('password') if pending.get('email', '').lower() == email.lower() else None)
+if not password:
+    raise SystemExit('ERROR: No saved password for ' + email + '. Save the account or set PARTIAL_PASS explicitly.')
+if '@' not in email or any(c.isspace() for c in email):
+    raise SystemExit('ERROR: Invalid account email')
+state = dict(pending if pending.get('email', '').lower() == email.lower() else {})
+state.update(email=email, password=password, verified=True, completed=False, skipDictation=False,
+             targetWords=int(words), remainingAccounts=int(remaining) + 1,
+             referralCode=os.environ.get('REFERRAL_CODE') or account.get('referralCode') or pending.get('referralCode') or 'SHUBHAM3680')
+fd, temporary = tempfile.mkstemp(dir=data, prefix='.continue-')
+with os.fdopen(fd, 'w') as stream:
+    json.dump(state, stream, indent=2)
+os.replace(temporary, path)
+print(password)
+PY
+)
+# wispr-resume retains the lock, stops on failure, and owns batch completion.
+exec "$SCRIPT_DIR/wispr-resume"

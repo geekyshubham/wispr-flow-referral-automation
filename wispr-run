@@ -7,16 +7,20 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib/env.sh"
 ACCOUNTS="${ACCOUNTS:-1}"
 WORDS="${WORDS:-${TARGET_WORDS:-2100}}"
-REFERRAL_CODE="${REFERRAL_CODE:-SHUBHAM2270}"
+REFERRAL_CODE="${REFERRAL_CODE:-SHUBHAM3680}"
 FOREGROUND="${FOREGROUND:-0}"
+WISPR_FRESH_SIGNUP="${WISPR_FRESH_SIGNUP:-0}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --accounts|-n) ACCOUNTS="${2:?}"; shift 2 ;;
     --words|-w) WORDS="${2:?}"; shift 2 ;;
     --referral) REFERRAL_CODE="${2:?}"; shift 2 ;;
+    --fresh) WISPR_FRESH_SIGNUP=1; shift ;;
     --background|--bg) FOREGROUND=0; shift ;;
     --foreground|--fg) FOREGROUND=1; shift ;;
     --help|-h)
@@ -26,6 +30,7 @@ while [ $# -gt 0 ]; do
       echo "  W  dictated words per account (default 2100)"
       echo "  Runs in the background by default. Use --foreground to watch logs here."
       echo "  After all accounts finish, mic/speakers and main Wispr are reset."
+      echo "  --fresh archives an unfinished attempt and starts with a new mailbox."
       echo "  Stop + reset anytime: ./wispr-cleanup"
       exit 0
       ;;
@@ -54,12 +59,12 @@ if ! [[ "$WORDS" =~ ^[0-9]+$ ]] || [ "$WORDS" -lt 1 ]; then
   exit 1
 fi
 
-export SKIP_RESUME_MAIN=1
-export REFERRAL_CODE TARGET_WORDS="$WORDS" WORDS
-chmod +x "${SCRIPT_DIR}/wispr-test" "${SCRIPT_DIR}/wispr-resume" \
-  "${SCRIPT_DIR}/wispr-complete-flow" "${SCRIPT_DIR}/wispr-cleanup" \
-  "${SCRIPT_DIR}/lib/"*.sh 2>/dev/null || true
+if python3 "${SCRIPT_DIR}/lib/job-lock.py" --is-held "$SCRIPT_DIR"; then
+  FOREGROUND=1
+fi
 
+export WISPR_FRESH_SIGNUP
+PID_FILE="${SCRIPT_DIR}/data/wispr-run.pid"
 # Detach so the whole N-account job continues after you close the terminal.
 if [ "$FOREGROUND" != "1" ] && [ -z "${WISPR_RUN_DETACHED:-}" ]; then
   mkdir -p "${SCRIPT_DIR}/data"
@@ -68,18 +73,35 @@ if [ "$FOREGROUND" != "1" ] && [ -z "${WISPR_RUN_DETACHED:-}" ]; then
   echo "  Log:  ${LOG}"
   echo "  Watch: tail -f ${LOG}"
   echo "  Stop + reset mic/speakers: ${SCRIPT_DIR}/wispr-cleanup"
-  nohup env WISPR_RUN_DETACHED=1 FOREGROUND=1 \
-    ACCOUNTS="$ACCOUNTS" WORDS="$WORDS" REFERRAL_CODE="$REFERRAL_CODE" \
-    "${SCRIPT_DIR}/wispr-run" --accounts "$ACCOUNTS" --words "$WORDS" \
-    --referral "$REFERRAL_CODE" --foreground \
-    >> "$LOG" 2>&1 &
-  echo $! > "${SCRIPT_DIR}/data/wispr-run.pid"
-  echo "  PID:  $!"
+  python3 "${SCRIPT_DIR}/lib/start-detached.py" \
+    "${SCRIPT_DIR}/wispr-run" "$LOG" "$PID_FILE" \
+    "$ACCOUNTS" "$WORDS" "$REFERRAL_CODE"
   exit 0
 fi
 
+if ! python3 "${SCRIPT_DIR}/lib/job-lock.py" --is-held "$SCRIPT_DIR"; then
+  exec python3 "${SCRIPT_DIR}/lib/job-lock.py" "$SCRIPT_DIR" \
+    "${SCRIPT_DIR}/wispr-run" --accounts "$ACCOUNTS" --words "$WORDS" --referral "$REFERRAL_CODE" --foreground
+fi
+python3 "${SCRIPT_DIR}/lib/prepare-isolated-runtime.py" >/dev/null
+export SKIP_RESUME_MAIN=1
+export REFERRAL_CODE TARGET_WORDS="$WORDS" WORDS REQUIRE_REFERRAL=1
+chmod +x "${SCRIPT_DIR}/wispr-test" "${SCRIPT_DIR}/wispr-resume" \
+  "${SCRIPT_DIR}/wispr-complete-flow" "${SCRIPT_DIR}/wispr-cleanup" \
+  "${SCRIPT_DIR}/lib/"*.sh "${SCRIPT_DIR}/lib/"*.py 2>/dev/null || true
+
+WISPR_RUN_TOKEN="$$-$(date +%s)"
+export WISPR_RUN_TOKEN
+export PYTHONUNBUFFERED=1
+mkdir -p "${SCRIPT_DIR}/data"
+echo "$WISPR_RUN_TOKEN" > "${SCRIPT_DIR}/data/wispr-run-token"
+
 restore_all() {
-  rm -f "${SCRIPT_DIR}/data/wispr-run.pid"
+  token_now="$(cat "${SCRIPT_DIR}/data/wispr-run-token" 2>/dev/null || true)"
+  if [ "$token_now" != "$WISPR_RUN_TOKEN" ]; then
+    echo "Skipping stale cleanup (token mismatch)."
+    return 0
+  fi
   bash "${SCRIPT_DIR}/lib/cleanup-all.sh" 2>/dev/null || true
 }
 trap restore_all EXIT
@@ -91,6 +113,7 @@ echo "  wispr-flow-referral-automation"
 echo "  Accounts to finish: ${ACCOUNTS}"
 echo "  Words per account:  ${WORDS}"
 echo "  Referral:           ${REFERRAL_CODE}"
+echo "  grep:               $(command -v grep)"
 echo "============================================"
 
 DATA_DIR="${SCRIPT_DIR}/data"
@@ -99,35 +122,32 @@ mkdir -p "$DATA_DIR"
 [ -f "$ACCOUNTS_FILE" ] || echo "[]" > "$ACCOUNTS_FILE"
 
 DONE=0
-ATTEMPT=0
-MAX_ATTEMPTS=$((ACCOUNTS * 4))
-
-while [ "$DONE" -lt "$ACCOUNTS" ] && [ "$ATTEMPT" -lt "$MAX_ATTEMPTS" ]; do
-  ATTEMPT=$((ATTEMPT + 1))
+ALLOW_CONTINUATION="${WISPR_CONTINUE_BATCH:-0}"
+while [ "$DONE" -lt "$ACCOUNTS" ]; do
   echo ""
-  echo "======== Slot $((DONE + 1))/${ACCOUNTS}  (attempt ${ATTEMPT}/${MAX_ATTEMPTS}) ========"
+  echo "======== Slot $((DONE + 1))/${ACCOUNTS} ========"
 
-  BEFORE=$(python3 -c "import json; print(len(json.load(open('${ACCOUNTS_FILE}'))))")
-  "${SCRIPT_DIR}/wispr-test" 1 --no-dictation || true
-  AFTER=$(python3 -c "import json; print(len(json.load(open('${ACCOUNTS_FILE}'))))")
+  SIGNUP_STATUS=0
+  WISPR_CONTINUE_BATCH="$ALLOW_CONTINUATION" WISPR_BATCH_DICTATION=1 REMAINING_ACCOUNTS=$((ACCOUNTS - DONE)) "${SCRIPT_DIR}/wispr-test" 1 --no-dictation || SIGNUP_STATUS=$?
+  if [ "$SIGNUP_STATUS" -ne 0 ]; then
+    export PRESERVE_WISPR_TASK_SPACES=1
+    echo "  Signup paused/failed (status ${SIGNUP_STATUS}). See the error and resume command above."
+    echo "  Preserving the same inbox and browser page; no new accounts will be attempted."
+    exit "$SIGNUP_STATUS"
+  fi
 
-  NEW=$(python3 - "$ACCOUNTS_FILE" "$BEFORE" <<'PY'
+  NEW=$(python3 - "$DATA_DIR/pending-signup.json" <<'PY'
 import json, sys
-path, before = sys.argv[1], int(sys.argv[2])
-accounts = json.load(open(path))
-new = accounts[before:]
-for a in new:
-    if a.get("verified") and a.get("email") and a.get("password"):
-        print(a["email"] + "\t" + a["password"])
-        break
+with open(sys.argv[1]) as stream:
+    account = json.load(stream)
+if account.get("verified") and account.get("email") and account.get("password") and not account.get("completed"):
+    print(account["email"] + "\t" + account["password"])
 PY
 )
 
   if [ -z "$NEW" ]; then
-    echo "  Signup not verified this attempt (often hCaptcha). Continuing loop..."
-    echo "  If ego-browser handed off, solve captcha then: ./wispr-resume <task-space>"
-    sleep 3
-    continue
+    echo "ERROR: Signup reported success without a verified account. Aborting."
+    exit 1
   fi
 
   EMAIL=$(printf '%s' "$NEW" | cut -f1)
@@ -136,11 +156,25 @@ PY
 
   if TARGET_WORDS="$WORDS" "${SCRIPT_DIR}/wispr-complete-flow" "$EMAIL" "$PASSWORD"; then
     DONE=$((DONE + 1))
+    python3 - "$DATA_DIR/pending-signup.json" "$((ACCOUNTS - DONE))" <<'PY'
+import json, os, sys, tempfile
+path, remaining = sys.argv[1:]
+with open(path) as stream:
+    pending = json.load(stream)
+pending.update(completed=True, remainingAccounts=int(remaining))
+fd, temporary = tempfile.mkstemp(dir=os.path.dirname(path), prefix='.pending-')
+with os.fdopen(fd, 'w') as stream:
+    json.dump(pending, stream, indent=2)
+os.replace(temporary, path)
+PY
     echo "  Finished ${DONE}/${ACCOUNTS} accounts."
+    ALLOW_CONTINUATION=1
   else
-    echo "  Dictation/login failed for ${EMAIL} — will try another account."
-    bash "${SCRIPT_DIR}/lib/cleanup-isolated.sh" \
-      "${SCRIPT_DIR}/profiles/$(echo "$EMAIL" | cut -d@ -f1)" 2>/dev/null || true
+    FLOW_STATUS=$?
+    export PRESERVE_WISPR_TASK_SPACES=1
+    echo "ERROR: Dictation/login failed for ${EMAIL}. Account, batch, and profile kept."
+    echo "Resume this same account with: ./wispr-resume"
+    exit "$FLOW_STATUS"
   fi
 
   bash "${SCRIPT_DIR}/lib/restore-audio.sh" restore 2>/dev/null || true
@@ -152,7 +186,7 @@ if [ "$DONE" -ge "$ACCOUNTS" ]; then
   echo "DONE: ${DONE}/${ACCOUNTS} accounts each reached ${WORDS} words."
   echo "Final reset: isolated Wispr gone, Built-in mic/speakers, main Wispr back."
 else
-  echo "INCOMPLETE: ${DONE}/${ACCOUNTS} accounts finished after ${ATTEMPT} attempts."
+  echo "INCOMPLETE: ${DONE}/${ACCOUNTS} accounts finished."
   echo "Still resetting mic/speakers and isolated Wispr..."
   exit 1
 fi

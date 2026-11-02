@@ -7,22 +7,38 @@ if ! command -v ego-browser >/dev/null 2>&1; then
   exit 0
 fi
 
-ego-browser nodejs <<'EOF' 2>/dev/null || true
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+HEADER=$(python3 - "$SCRIPT_DIR" <<'PY'
+from pathlib import Path
+import json, sys
+root = Path(sys.argv[1])
+print('const pendingPath = ' + json.dumps(str(root / 'data/pending-signup.json')) + ';')
+print('const moduleUrl = ' + json.dumps((root / 'lib/web-auth.mjs').as_uri()) + ';')
+PY
+)
+ego-browser nodejs <<EOF 2>/dev/null || true
+${HEADER}
+const { readJson, writeJson } = await import(moduleUrl)
+const pending = await readJson(pendingPath)
+if (!pending?.taskSpaceId || pending.taskSpaceClosed) process.exit(0)
 const spaces = await listTaskSpaces()
 let closed = 0
 for (const s of spaces || []) {
   const name = String(s.name || s.taskId || '')
-  if (!/^wispr/i.test(name)) continue
+  if (s.id !== pending.taskSpaceId) continue
   try {
     if (s.ownership === 'user' || s.ownership === 'agentDelegatedToUser') {
-      try { await claimTaskSpace(s.id) } catch (e) {}
+      console.log('KEEP_SPACE:' + name + ':awaiting user');
+      continue
     }
-    await completeTaskSpace(s.id, { keep: false })
+    const task = await taskSpace(s.id)
+    await task.finish({ keep: [] })
+    await writeJson(pendingPath, { ...pending, taskSpaceClosed: true })
     closed += 1
-    cliLog('CLOSED_SPACE:' + name)
+    console.log('CLOSED_SPACE:' + name)
   } catch (e) {
-    cliLog('SKIP_SPACE:' + name + ':' + String(e && e.message || e))
+    console.log('SKIP_SPACE:' + name + ':' + String(e && e.message || e))
   }
 }
-cliLog('CLOSED_COUNT:' + closed)
+console.log('CLOSED_COUNT:' + closed)
 EOF

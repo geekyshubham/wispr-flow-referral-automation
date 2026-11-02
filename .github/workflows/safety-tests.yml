@@ -13,3 +13,6 @@ jobs:
           python-version: "3.12"
       - name: Regression — do not kill Application Support/Wispr Flow
         run: python3 lib/kill-isolated-wispr.py --self-test
+      - name: Signup retries, email verification, and runner failures
+        run: |
+          npm test

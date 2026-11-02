@@ -8,7 +8,7 @@ AFTER="${3:?after_lines}"
 TIMEOUT="${4:-90}"
 touch "$LOG"
 for _ in $(seq 1 "$TIMEOUT"); do
-  if tail -n +"$((AFTER + 1))" "$LOG" 2>/dev/null | rg -q "$PATTERN"; then
+  if tail -n +"$((AFTER + 1))" "$LOG" 2>/dev/null | grep -F -- "$PATTERN" >/dev/null; then
     exit 0
   fi
   sleep 1

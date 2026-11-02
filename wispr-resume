@@ -1,48 +1,81 @@
 #!/usr/bin/env bash
-# Complete signup after manual hCaptcha - run after user solves captcha in ego lite
-# Usage: ./wispr-resume <task-space-id-or-name>
+# Resume the saved account and batch without repeating completed accounts.
 set -euo pipefail
-
-TASK="${1:-}"
-
-if [ -z "$TASK" ]; then
-  echo "Usage: $0 <task-space-id>"
-  echo "Run this after clicking hCaptcha in ego lite when wispr-test handed off."
-  exit 1
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "${SCRIPT_DIR}/lib/env.sh"
+if ! python3 "${SCRIPT_DIR}/lib/job-lock.py" --is-held "$SCRIPT_DIR"; then
+  exec python3 "${SCRIPT_DIR}/lib/job-lock.py" "$SCRIPT_DIR" "${SCRIPT_DIR}/wispr-resume" "$@"
 fi
-
-HEADER=$(python3 -c 'import json,sys; print("const TASK_SPACE = %s;" % json.dumps(sys.argv[1]))' "$TASK")
-
+node "${SCRIPT_DIR}/lib/referral-status.mjs" "$SCRIPT_DIR/data/pending-signup.json"
+REQUIRE_REFERRAL=$(python3 - "$SCRIPT_DIR/data/pending-signup.json" <<'PYREQUIRE'
+import json, sys
+try:
+    with open(sys.argv[1]) as stream:
+        print(int(bool(json.load(stream).get('requireReferral'))))
+except FileNotFoundError:
+    print(0)
+PYREQUIRE
+)
+export REQUIRE_REFERRAL
+HEADER=$(python3 - "$SCRIPT_DIR" "${1:-}" <<'PYCONFIG'
+import json, sys
+from pathlib import Path
+root, task = sys.argv[1:]
+print("const dataDir = " + json.dumps(root + "/data") + ";")
+print("const requestedTask = " + json.dumps(task) + ";")
+print("const moduleUrl = " + json.dumps(Path(root, "lib/web-auth.mjs").as_uri()) + ";")
+PYCONFIG
+)
 ego-browser nodejs <<EOF
 ${HEADER}
-await takeOverTaskSpace(TASK_SPACE)
-
-const setName = async (name) => {
-  return await js(
-    '(() => { const el = document.querySelector("input[name=Full-name]"); if (!el) return "NO_EL"; el.focus(); const d = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value"); const v = ' +
-      JSON.stringify(name) +
-      '; if (d && d.set) d.set.call(el, v); else el.value = v; el.dispatchEvent(new Event("input", { bubbles: true })); el.dispatchEvent(new Event("change", { bubbles: true })); return el.value; })()'
-  )
-}
-
-let snap = await snapshotText()
-cliLog('BEFORE:' + snap.replace(/\n/g, ' ').slice(0, 500))
-if (snap.includes('Password') || snap.toLowerCase().includes('name')) {
-  const written = await setName('Alex Rivera')
-  cliLog('NAME_SET:' + written)
-  await wait(1)
-}
-
-const how = await js('(() => { const btn = [...document.querySelectorAll("button")].find(b => /continue/i.test((b.innerText || b.textContent || "").trim())); const f = document.querySelector("form"); if (btn) { btn.click(); if (f && f.requestSubmit) { try { f.requestSubmit(btn) } catch (e) { f.requestSubmit() } } return "clicked"; } if (f && f.requestSubmit) { f.requestSubmit(); return "requestSubmit"; } return "no-button"; })()')
-cliLog('SUBMIT:' + how)
-await wait(10)
-snap = await snapshotText()
-cliLog('CHECK_EMAIL:' + snap.includes('Check your email'))
-
-if (!snap.includes('Check your email')) {
-  cliLog('ERROR:Still not on check-email screen. Name must have no digits; hCaptcha must stay solved.')
-  cliLog('SNAP:' + snap.replace(/\n/g, ' ').slice(0, 600))
-} else {
-  cliLog('SUCCESS:Signup submitted. Check mail.tm inbox for verification link.')
+const { readJson, runSignup } = await import(moduleUrl);
+const pending = await readJson(dataDir + '/pending-signup.json');
+if (!pending) throw new Error('No saved signup to resume');
+if (requestedTask && ![String(pending.taskSpaceId), pending.taskSpace].includes(requestedTask)) throw new Error('Task does not match the saved signup');
+if (!pending.completed && (!pending.verified || (pending.requireReferral && !pending.signupSynced))) {
+  const space = (await listTaskSpaces()).find(s => s.id === pending.taskSpaceId);
+  let task;
+  if (space?.ownership === 'agentDelegatedToUser') task = await takeOverTaskSpace(pending.taskSpaceId);
+  else if (space?.ownership === 'user') task = await claimTaskSpace(pending.taskSpaceId);
+  else task = await taskSpace(space ? pending.taskSpaceId : pending.taskSpace || 'wispr-signup');
+  process.exitCode = await runSignup({ ...pending, resume: true, pageAvailable: !!space }, task);
 }
 EOF
+FIELDS=$(python3 - "$SCRIPT_DIR/data/pending-signup.json" <<'PYFIELDS'
+import json, sys
+p = json.load(open(sys.argv[1]))
+if not p.get('verified'):
+    raise SystemExit('ERROR: The saved account is not verified')
+values = [p[k] for k in ('email', 'password', 'targetWords', 'remainingAccounts', 'referralCode')]
+values += [str(bool(p.get('skipDictation'))).lower(), str(bool(p.get('completed'))).lower()]
+print("\t".join(str(value) for value in values))
+PYFIELDS
+)
+IFS=$'\t' read -r EMAIL PASSWORD WORDS REMAINING REFERRAL_CODE SKIP_DICTATION COMPLETED <<< "$FIELDS"
+if [ "$COMPLETED" != "true" ]; then
+  if [ "$SKIP_DICTATION" != "true" ]; then
+    TARGET_WORDS="$WORDS" "${SCRIPT_DIR}/wispr-complete-flow" "$EMAIL" "$PASSWORD"
+  fi
+  REMAINING=$((REMAINING - 1))
+  python3 - "$SCRIPT_DIR/data/pending-signup.json" "$REMAINING" <<'PYCOMPLETE'
+import json, os, sys, tempfile
+path, remaining = sys.argv[1:]
+with open(path) as stream:
+    pending = json.load(stream)
+pending.update(completed=True, remainingAccounts=max(0, int(remaining)))
+fd, temporary = tempfile.mkstemp(dir=os.path.dirname(path), prefix='.pending-')
+with os.fdopen(fd, 'w') as stream:
+    json.dump(pending, stream, indent=2)
+os.replace(temporary, path)
+PYCOMPLETE
+fi
+if [ "$REMAINING" -gt 0 ]; then
+  export WISPR_CONTINUE_BATCH=1
+  if [ "$SKIP_DICTATION" = "true" ]; then
+    exec env REFERRAL_CODE="$REFERRAL_CODE" TARGET_WORDS="$WORDS" \
+      "${SCRIPT_DIR}/wispr-test" "$REMAINING" --no-dictation
+  fi
+  exec "${SCRIPT_DIR}/wispr-run" --accounts "$REMAINING" --words "$WORDS" --referral "$REFERRAL_CODE" --foreground
+fi
+bash "${SCRIPT_DIR}/lib/close-ego-wispr-spaces.sh"
+echo "Saved batch complete; no remaining accounts."

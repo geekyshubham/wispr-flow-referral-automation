@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Keep one next mailbox ready; a separate lock permits work during dictation.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "${SCRIPT_DIR}/lib/env.sh"
+if [ "${1:-}" = "--foreground" ]; then
+  exec python3 "$SCRIPT_DIR/lib/job-lock.py" --name next-inbox "$SCRIPT_DIR" \
+    "$(command -v node)" "$SCRIPT_DIR/lib/prepare-inbox.mjs" "$SCRIPT_DIR/data" "${MAIL_PROVIDER:-maildrop}"
+fi
+if [ "$#" -gt 0 ]; then
+  echo "Usage: $0 [--foreground]"
+  exit 1
+fi
+exec python3 "$SCRIPT_DIR/lib/job-lock.py" --name next-inbox --detach "$SCRIPT_DIR" \
+  "$(command -v node)" "$SCRIPT_DIR/lib/prepare-inbox.mjs" "$SCRIPT_DIR/data" "${MAIL_PROVIDER:-maildrop}"

@@ -1,62 +1,9 @@
 #!/usr/bin/env bash
-# Sign into a verified Wispr Flow account via browser and run dictation test
-# Usage: ./wispr-dictate <email> <password>
+# Compatibility entrypoint: use the same isolated, verified account flow.
 set -euo pipefail
-
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-EMAIL="${1:-}"
-PASSWORD="${2:-}"
-
-if [ -z "$EMAIL" ] || [ -z "$PASSWORD" ]; then
+if [ "$#" -ne 2 ]; then
   echo "Usage: $0 <email> <password>"
-  echo "Example: $0 flowtest64407@emalupe.com SecureFlow2026!"
   exit 1
 fi
-
-echo "=== Sign in to Wispr Flow and run dictation test ==="
-echo "Email: $EMAIL"
-
-ego-browser nodejs <<EOF
-const EMAIL = '${EMAIL}'
-const PASSWORD = '${PASSWORD}'
-
-const task = await useOrCreateTaskSpace('wispr-login-dictate-' + Date.now())
-await cdp('Network.clearBrowserCookies', {})
-await openOrReuseTab('https://wisprflow.ai/get-started', { wait: true, timeout: 30 })
-await wait(2)
-
-await fillInput('input[name="email"]', EMAIL, { label: 'email' })
-for (let t = 0; t < 25; t++) {
-  await wait(1)
-  if (await js('(() => document.querySelector("input[name=cf-turnstile-response]")?.value?.length || 0)()') > 100) break
-}
-await wait(2)
-let snap = await snapshotText()
-let btn = snap.match(/button \[ref=(\d+)/)?.[1]
-if (btn) await click('@' + btn)
-await wait(5)
-
-snap = await snapshotText()
-cliLog('STATE:' + (snap.includes('Password') ? 'password' : snap.includes('verification') ? 'otp' : 'unknown'))
-
-if (snap.includes('Password')) {
-  await fillInput('input[name="Password"]', PASSWORD, { label: 'pwd' })
-  await wait(1)
-  snap = await snapshotText()
-  btn = snap.match(/button \[ref=(\d+)/)?.[1]
-  if (btn) await click('@' + btn)
-  await wait(5)
-}
-
-cliLog('LOGIN_URL:' + (await pageInfo()).url)
-cliLog('READY_FOR_APP:true')
-await completeTaskSpace(task.id, { keep: false })
-EOF
-
-echo ""
-echo "Now open Wispr Flow app -> Sign in via browser -> use the browser session"
-echo "Or sign in manually with: $EMAIL / $PASSWORD"
-echo ""
-echo "Starting dictation test in 5 seconds..."
-sleep 5
-bash "${SCRIPT_DIR}/lib/dictation-test.sh"
+exec "${SCRIPT_DIR}/wispr-complete-flow" "$@"

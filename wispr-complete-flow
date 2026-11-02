@@ -2,18 +2,39 @@
 # Complete isolated referral flow: login test account in separate Wispr profile + W-word dictation
 # Success is SERVER /history/stats total_words (referral source of truth), not local cache.
 # Usage: TARGET_WORDS=2100 ./wispr-complete-flow [email] [password]
-# Default: flowtest64407@emalupe.com / SecureFlow2026!
+# Credentials must be supplied explicitly.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-EMAIL="${1:-flowtest64407@emalupe.com}"
-PASSWORD="${2:-SecureFlow2026!}"
-PROFILE_DIR="${SCRIPT_DIR}/profiles/$(echo "$EMAIL" | cut -d@ -f1)"
-WISPR_BIN="/Applications/Wispr Flow.app/Contents/MacOS/Wispr Flow"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/lib/env.sh"
+if ! python3 "${SCRIPT_DIR}/lib/job-lock.py" --is-held "$SCRIPT_DIR"; then
+  exec python3 "${SCRIPT_DIR}/lib/job-lock.py" "$SCRIPT_DIR" "${SCRIPT_DIR}/wispr-complete-flow" "$@"
+fi
+EMAIL="${1:-}"
+PASSWORD="${2:-}"
+if [ -z "$EMAIL" ] || [ -z "$PASSWORD" ]; then
+  echo "Usage: $0 <email> <password>"
+  exit 1
+fi
+EMAIL=$(python3 - "$EMAIL" <<'PYNORMALIZE'
+import sys
+print(sys.argv[1].strip().lower())
+PYNORMALIZE
+)
+PROFILE_KEY=$(python3 "${SCRIPT_DIR}/lib/verify-runtime-isolation.py" --key "$EMAIL")
+PROFILE_DIR="${SCRIPT_DIR}/profiles/${PROFILE_KEY}"
+WISPR_APP_PATH=$(python3 "${SCRIPT_DIR}/lib/prepare-isolated-runtime.py")
+export WISPR_APP_PATH
+WISPR_BIN="${WISPR_APP_PATH}/Contents/MacOS/Wispr Flow"
+export WISPR_BIN_PATH="$WISPR_BIN"
+python3 "${SCRIPT_DIR}/lib/verify-runtime-isolation.py" "$PROFILE_DIR"
 DATA_DIR="${SCRIPT_DIR}/data"
 TARGET_WORDS="${TARGET_WORDS:-${WORDS:-2100}}"
+[[ "$TARGET_WORDS" =~ ^[0-9]+$ ]] && [ "$TARGET_WORDS" -gt 0 ] || { echo "Invalid word target"; exit 1; }
 SERVER_OK=0
 mkdir -p "$PROFILE_DIR" "$DATA_DIR"
+chmod 700 "$PROFILE_DIR" "$DATA_DIR"
 
 cleanup_and_restore() {
   if [ "$SERVER_OK" = "1" ]; then
@@ -41,69 +62,47 @@ echo "============================================"
 echo ""
 echo "[1/5] Signing in via ego-browser (isolated browser session)..."
 
-TOKEN_JSON=$(ego-browser nodejs <<EOF 2>&1
-const EMAIL = '${EMAIL}'
-const PASSWORD = '${PASSWORD}'
-const task = await useOrCreateTaskSpace('wispr-isolated-' + Date.now())
-await cdp('Network.clearBrowserCookies', {})
-await openOrReuseTab('https://wisprflow.ai/login', { wait: true, timeout: 30 })
-await wait(2)
-
-try {
-  const snap0 = await snapshotText()
-  const okRef = snap0.match(/button \\[ref=(\\d+).*?\\n\\s*text "OK"/s)?.[1]
-  if (okRef) await click('@' + okRef, { label: 'privacy OK' })
-} catch (e) {}
-
-await fillInput('input[name="email"]', EMAIL, { label: 'email' })
-for (let t = 0; t < 25; t++) {
-  await wait(1)
-  if (await js('(() => document.querySelector("input[name=cf-turnstile-response]")?.value?.length || 0)()') > 100) break
-}
-await wait(2)
-let snap = await snapshotText()
-let btn = snap.match(/button \\[ref=(\\d+)/)?.[1]
-if (btn) await click('@' + btn)
-await wait(5)
-snap = await snapshotText()
-if (!snap.includes('Password') && snap.match(/button \\[ref=(\\d+)/)?.[1]) {
-  await click('@' + snap.match(/button \\[ref=(\\d+)/)[1])
-  await wait(5)
-  snap = await snapshotText()
-}
-
-if (snap.includes('Password')) {
-  await fillInput('input[name="Password"]', PASSWORD, { label: 'pwd' })
-  await wait(1)
-  snap = await snapshotText()
-  const boxRef = snap.match(/checkbox \\[ref=(\\d+)/)?.[1]
-  const hcRef = snap.match(/iframe \\[ref=(\\d+)/)?.[1]
-  if (boxRef) { try { await click('@' + boxRef, { label: 'hcaptcha checkbox' }) } catch (e) {} }
-  else if (hcRef) { try { await click('@' + hcRef, { label: 'hcaptcha' }) } catch (e) {} }
-  let hcLen = 0
-  for (let h = 0; h < 20; h++) {
-    hcLen = await js('(() => document.querySelector("textarea[name=h-captcha-response]")?.value?.length || 0)()')
-    if (hcLen > 10) break
-    await wait(2)
-  }
-  cliLog('HC_TOKEN_LEN:' + hcLen)
-  await js('(() => { const f = document.querySelector("form"); if (f && f.requestSubmit) f.requestSubmit(); else f && f.submit(); return true })()')
-  await wait(8)
-}
-
-const token = await js('(() => localStorage.getItem("sb-dodjkfqhwrzqjwkfnthl-auth-token"))()')
-if (!token) {
-  cliLog('ERROR:Login failed - no auth token')
-  cliLog('URL:' + (await pageInfo()).url)
-} else {
-  cliLog('TOKEN_OK:yes')
-  cliLog('TOKEN_JSON_START')
-  cliLog(token)
-  cliLog('TOKEN_JSON_END')
-}
-await completeTaskSpace(task.id, { keep: false })
-EOF
+HEADER=$(python3 - "$SCRIPT_DIR" "$EMAIL" "$PASSWORD" "$PROFILE_DIR" <<'PYCONFIG'
+import json, sys
+from pathlib import Path
+root, email, password = sys.argv[1:4]
+print("const config = " + json.dumps(dict(dataDir=root + "/data", profileDir=sys.argv[4], email=email, password=password)) + ";")
+print("const moduleUrl = " + json.dumps(Path(root, "lib/web-auth.mjs").as_uri()) + ";")
+PYCONFIG
 )
+TOKEN_JSON=$(ego-browser nodejs <<EOF 2>&1
+${HEADER}
+const { readJson, writeJson, login, refreshWorkosSession } = await import(moduleUrl);
+try {
+  let token = await readJson(config.dataDir + '/last-web-token.json');
+  const native = (await readJson(config.profileDir + '/session.json'))?.workosSession;
+  if (native?.email?.toLowerCase() === config.email.toLowerCase()) token = {
+    provider: 'workos', access_token: native.accessToken, refresh_token: native.refreshToken,
+    expires_at: native.expiresAt, client_id: native.clientId, user: {id:native.userId,email:native.email}
+  };
+  if (token?.user?.email?.toLowerCase() !== config.email.toLowerCase() || !token.access_token) token = null;
+  if (token && (!Number.isFinite(token.expires_at) || token.expires_at * 1000 < Date.now() + 60000)) {
+    if (token.provider === 'workos') {
+      console.log('STAGE:Refreshing saved session');
+      token = await refreshWorkosSession(token);
+    } else token = null;
+  }
+  if (!token) {
+    const pending = await readJson(config.dataDir + '/pending-signup.json');
+    const task = await taskSpace(pending?.taskSpaceId ?? 'wispr-signup');
+    token = JSON.parse(await login(task.page('p1'), config.email, config.password));
+  }
+  await writeJson(config.dataDir + '/last-web-token.json', token);
+  console.log('TOKEN_OK:yes');
+  console.log('TOKEN_JSON_START');
+  console.log(JSON.stringify(token));
+  console.log('TOKEN_JSON_END');
+} catch (error) {
+  console.log('ERROR:' + error.message);
+  process.exitCode = 1;
+}
+EOF
+) || true
 
 TOKEN=$(echo "$TOKEN_JSON" | python3 -c "
 import sys
@@ -123,7 +122,7 @@ fi
 
 echo "  Auth token obtained for ${EMAIL}"
 TOKEN_FILE="${DATA_DIR}/last-web-token.json"
-printf '%s\n' "$TOKEN" > "$TOKEN_FILE"
+chmod 600 "$TOKEN_FILE"
 
 echo ""
 echo "[2/5] Checking SERVER word count (referral source of truth)..."
@@ -141,6 +140,18 @@ print(f\"  is_initialized: {d.get('is_initialized')}\")
 print(f\"  words_this_week: {d.get('words_this_week')}\")
 " || true
 echo "  Server words now: ${SERVER_NOW}"
+if ! [[ "$SERVER_NOW" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: Cannot verify server word count. Keeping this account for resume."
+  exit 1
+fi
+
+REFERRAL_ASSOCIATED=$(python3 "${SCRIPT_DIR}/lib/fetch-server-stats.py" --quiet --referral --token-file "$TOKEN_FILE" 2>/dev/null || echo -1)
+if [ "${REQUIRE_REFERRAL:-0}" = "1" ] && [ "$REFERRAL_ASSOCIATED" != "1" ]; then
+  echo "ERROR: Wispr has not confirmed a referral association for ${EMAIL}."
+  echo "The account is kept; resolve referral eligibility before ./wispr-resume."
+  echo "Word count alone does not confirm referral credit."
+  exit 1
+fi
 
 # Step 3: Inject session into isolated Wispr profile
 echo ""
@@ -159,6 +170,8 @@ else:
 
 prefs = config.setdefault("prefs", {})
 user = prefs.setdefault("user", {})
+if user.get("email") and user["email"].lower() != email.lower():
+    raise SystemExit("Refusing to overwrite a different account's profile")
 user.update({
     "email": email,
     "onboardingCompleted": True,
@@ -177,9 +190,26 @@ for name in ("accessibility", "microphone"):
     if name not in names:
         perms.append({"name": name, "clicked": True, "granted": True})
 
-session = {"sb-dodjkfqhwrzqjwkfnthl-auth-token": token}
+auth = json.loads(token)
+if auth.get("provider") == "workos":
+    session = {
+        "authProviderId": "workos",
+        "workosSession": {
+            "accessToken": auth["access_token"],
+            "refreshToken": auth["refresh_token"],
+            "userId": auth["user"]["id"],
+            "email": auth["user"]["email"],
+            "avatarUrl": None,
+            "expiresAt": auth["expires_at"],
+            "clientId": auth.get("client_id"),
+        },
+    }
+    user["uuid"] = auth["user"]["id"]
+else:
+    session = {"sb-dodjkfqhwrzqjwkfnthl-auth-token": token}
 with open(os.path.join(profile, "session.json"), "w") as f:
     json.dump(session, f, indent=2)
+os.chmod(os.path.join(profile, "session.json"), 0o600)
 with open(config_path, "w") as f:
     json.dump(config, f, indent=2)
 
@@ -199,6 +229,7 @@ else
   echo "[4/5] Launching isolated Wispr Flow (separate from your main account)..."
 
   python3 "${SCRIPT_DIR}/lib/kill-isolated-wispr.py" "$PROFILE_DIR" 2>/dev/null || true
+  bash "${SCRIPT_DIR}/lib/pause-main-wispr.sh" "$PROFILE_DIR"
   sleep 2
 
   : > "${DATA_DIR}/isolated-wispr.log"
@@ -206,8 +237,10 @@ else
   ISOLATED_PID=$!
   disown "$ISOLATED_PID" 2>/dev/null || true
   echo "  Isolated Wispr PID: ${ISOLATED_PID}"
-  echo "  Waiting 15s for app to initialize..."
-  sleep 15
+  echo "  Isolated cmd: $(ps -p "$ISOLATED_PID" -o args= 2>/dev/null || echo gone)"
+  echo "  Waiting for the isolated helper to initialize..."
+  bash "${SCRIPT_DIR}/lib/wait-new-log.sh" "${DATA_DIR}/isolated-wispr.log" "Helper service is ready: true" 0 90
+  python3 "${SCRIPT_DIR}/lib/verify-runtime-isolation.py" "$PROFILE_DIR" "$ISOLATED_PID"
 
   echo ""
   echo "[5/5] Dictating until SERVER shows ${TARGET_WORDS}+ words..."
@@ -223,9 +256,12 @@ else
       SERVER_OK=1
       break
     fi
-    LOCAL_GOAL=$((TARGET_WORDS + CYCLE * 500))
+    LOCAL_GOAL="$TARGET_WORDS"
     echo "  Dictating until local cache >= ${LOCAL_GOAL}, then waiting for upload..."
-    bash "${SCRIPT_DIR}/lib/dictate-fast.sh" "$PROFILE_DIR" "${LOCAL_GOAL}" || true
+    if ! bash "${SCRIPT_DIR}/lib/dictate-fast.sh" "$PROFILE_DIR" "${LOCAL_GOAL}"; then
+      echo "ERROR: Dictation failed. Keeping this profile for ./wispr-resume."
+      exit 1
+    fi
     WAIT_SERVER_TIMEOUT=240 bash "${SCRIPT_DIR}/lib/wait-server-words.sh" "$PROFILE_DIR" "${TARGET_WORDS}" && {
       SERVER_OK=1
       break
@@ -241,7 +277,13 @@ else
   FINAL_WORDS=$(python3 "${SCRIPT_DIR}/lib/fetch-server-stats.py" --quiet "$PROFILE_DIR" 2>/dev/null || echo 0)
 fi
 
-python3 - "$DATA_DIR/completions.json" "$EMAIL" "$PROFILE_DIR" "$FINAL_WORDS" <<'PY'
+if ! [[ "${FINAL_WORDS:-}" =~ ^[0-9]+$ ]] || [ "$FINAL_WORDS" -lt "$TARGET_WORDS" ]; then
+  SERVER_OK=0
+  echo "ERROR: Final server count is unconfirmed/below target. Profile kept; resume the same account."
+  exit 1
+fi
+
+python3 - "$DATA_DIR/completions.json" "$EMAIL" "$PROFILE_DIR" "$FINAL_WORDS" "$REFERRAL_ASSOCIATED" <<'PY'
 import json, sys
 from datetime import datetime, timezone
 path, email, profile = sys.argv[1:4]
@@ -250,15 +292,21 @@ try:
         data = json.load(f)
 except FileNotFoundError:
     data = []
-data.append({
+record = {
     "email": email,
     "profileDir": profile,
     "serverTotalWords": int(sys.argv[4]) if len(sys.argv) > 4 else 0,
     "completedAt": datetime.now(timezone.utc).isoformat(),
     "isolated": True,
     "serverConfirmed": True,
+    "referralAssociated": sys.argv[5] == "1",
     "cleanedUp": True
-})
+}
+existing = next((i for i, item in enumerate(data) if item.get("email", "").lower() == email.lower()), None)
+if existing is None:
+    data.append(record)
+else:
+    data[existing] = record
 with open(path, "w") as f:
     json.dump(data, f, indent=2)
 PY
