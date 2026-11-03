@@ -108,6 +108,7 @@ Login for an already-created account usually skips captcha. OAuth (Google/Apple)
 ```bash
 ./wispr-next-inbox                    # prepare one next inbox in the background
 ./wispr-test 1 --no-dictation          # signup only
+./wispr-recheck                        # retry a saved referral rejection live
 ./wispr-resume [task-space]            # resume saved signup + complete remaining flow
 ./wispr-complete-flow email password   # isolated login + W words + cleanup
 ./wispr-cleanup                        # stop job + reset mic/speakers/Wispr
@@ -124,7 +125,7 @@ Signup checks DNS for Wispr and the selected mail provider before allocating a m
 
 Every new signup uses an address absent from both signup and completion history. Used addresses in the prefetch cache are discarded. `--fresh` archives an unfinished attempt and starts a different mailbox; `./wispr-resume` only continues the current account’s verification or desktop work. A registered address is never submitted for a new signup.
 
-An explicit referral rejection is terminal for that attempt. Both `./wispr-resume` and a new signup with the same code stop with status 76 while that rejection is saved, including when `--fresh` is supplied. An explicit `./wispr-run --fresh --referral DIFFERENT_CODE` archives the rejected attempt and starts a separate test with that code; changing the code alone does not resume or replace the saved account. Preserve rejected records for Wispr support; a different code does not establish eligibility or fix a service rejection.
+A website `user_exists` rejection is not necessarily final. After `/signup` answers, the runner also calls the authenticated desktop referral endpoint (`POST /api/v1/referral/apply` with `referrer_code`, `dub_click_id`, and `check_credits`) and reads `GET /api/v1/referral/` back to require a non-empty `referer_name`. The website completes email signup before its own referral-bearing `/signup` call, so this desktop path is the normal recovery for a freshly created account. If both paths fail, the attempt is terminal: `./wispr-resume` and same-code `--fresh` stop with status 76. `./wispr-recheck` retries the saved account against the live service and repairs `pending-signup.json` when `referer_name` is present. An explicit `./wispr-run --fresh --referral DIFFERENT_CODE` archives the rejected attempt and starts a separate test with that code; changing the code alone does not resume or replace the saved account. Preserve rejected records for Wispr support; a different code does not establish eligibility or fix a service rejection.
 
 Only one account-processing job can run at a time. Background startup confirms it acquired the job lock; `./wispr-cleanup` stops the owned process group and restores audio. Failures keep the same account and its remaining batch count. `./wispr-resume` resumes that state, preserves signup-only mode, and skips completed work. Profiles are keyed by the full email address, and completion records are updated instead of duplicated.
 
@@ -132,7 +133,7 @@ Only one account-processing job can run at a time. Background startup confirms i
 
 The automation disables the download page’s installer auto-start marker before page scripts execute. It uses the already installed/test app; normal manual download links stay available. Wispr web authentication is cleared before opening a new invitation, so the previous account cannot be redirected into that signup.
 
-A completed word target proves dictation/upload succeeded. Referral association and rewards are separate service decisions; do not infer a credited referral from word count alone. New `wispr-run` batches require the service to report a referral association before dictation begins; a rejected or unconfirmed association stops that account for review and preserves its state.
+A completed word target proves dictation/upload succeeded. Referral association and rewards are separate service decisions; do not infer a credited referral from word count alone. New `wispr-run` batches try the desktop referral API, then require `GET /api/v1/referral/` to report a `referer_name` before dictation begins; a rejected or unconfirmed association stops that account for review and preserves its state.
 
 `data/referral-diagnostic.json` stores the service result and a sanitized ordering trace for the website's signup/verification requests. It excludes passwords, verification codes and tokens. The trace observes the website; it does not alter authentication flags or referral eligibility. A valid code is separate from a successfully associated referral. The response alone does not identify IP filtering or prove a server ordering defect.
 

@@ -27,7 +27,8 @@ class RunnerTests(unittest.TestCase):
         (root / 'lib/env.sh').write_text('')
         (root / 'lib/prepare-isolated-runtime.py').write_text('print("/mock/isolated.app")\n')
         (root / 'lib/check-network.py').write_text('raise SystemExit(0)\n')
-        shutil.copy(ROOT / 'lib/referral-status.mjs', root / 'lib/referral-status.mjs')
+        for name in ('referral-status.mjs', 'referral-apply.mjs', 'file-state.mjs'):
+            shutil.copy(ROOT / 'lib' / name, root / 'lib' / name)
         for name in ('cleanup-all.sh', 'restore-audio.sh', 'resume-main-wispr.sh', 'close-ego-wispr-spaces.sh'):
             (root / 'lib' / name).write_text('#!/bin/bash\nexit 0\n')
         if real_cleanup:

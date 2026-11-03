@@ -13,6 +13,10 @@ test('a valid code does not turn an explicit referral rejection into success', (
   assert.equal(referralBlocked({ requireReferral: true, signupSynced: true, referralStatus: null }), false);
   assert.equal(referralDecision({ referral_code_valid: true, referral_applied: true }), 'associated');
   assert.equal(referralDecision({ referral_code_valid: false, referral_applied: true }), 'rejected');
+  assert.equal(referralBlocked({
+    phase: 'referral_associated', requireReferral: true, signupSynced: true,
+    referralStatus: { referral_code_valid: true, referral_applied: true },
+  }), false);
 });
 
 test('only an explicit fresh start with a different code can archive a rejected attempt', () => {

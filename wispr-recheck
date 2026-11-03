@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Re-check a saved referral rejection against the live account, applying the
+# desktop referral API when the website's /signup response was rejected.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "${SCRIPT_DIR}/lib/env.sh"
+STATE="${1:-${SCRIPT_DIR}/data/pending-signup.json}"
+TOKEN="${2:-${SCRIPT_DIR}/data/last-web-token.json}"
+node "${SCRIPT_DIR}/lib/referral-status.mjs" --recheck "$STATE" "$TOKEN"

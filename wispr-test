@@ -18,6 +18,10 @@ for arg in "$@"; do
   esac
 done
 [[ "$N" =~ ^[0-9]+$ ]] && [ "$N" -gt 0 ] || exit 1
+if [ "$FRESH" != "1" ] && [ -f "${SCRIPT_DIR}/data/pending-signup.json" ]; then
+  RECHECK="$(node "${SCRIPT_DIR}/lib/referral-status.mjs" --recheck "${SCRIPT_DIR}/data/pending-signup.json" 2>/dev/null || true)"
+  [ "${RECHECK#REFERRAL_ASSOCIATED:}" = "$RECHECK" ] || echo "$RECHECK"
+fi
 if [ "$FRESH" = "1" ]; then
   node "${SCRIPT_DIR}/lib/referral-status.mjs" "$SCRIPT_DIR/data/pending-signup.json" --fresh "${REFERRAL_CODE:-SHUBHAM3680}"
 else
