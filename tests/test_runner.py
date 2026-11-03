@@ -101,6 +101,16 @@ finally:
         self.assertEqual(stats.access_token_from_session({'authProviderId': 'workos', 'workosSession': {'accessToken': 'workos-access'}}), 'workos-access')
         self.assertEqual(stats.access_token_from_session({'sb-dodjkfqhwrzqjwkfnthl-auth-token': '{"access_token":"legacy-access"}'}), 'legacy-access')
 
+    def test_referral_threshold_warning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.fixture(directory)
+            self.script(root / 'wispr-test', '#!/bin/bash\nexit 1\n')
+            low = self.invoke(root, 'wispr-run', '--accounts', '1', '--words', '500', '--foreground')
+            self.assertIn('2,000 server-confirmed words', low.stderr + low.stdout)
+            self.assertIn('will not credit', low.stderr + low.stdout)
+            high = self.invoke(root, 'wispr-run', '--accounts', '1', '--words', '2100', '--foreground')
+            self.assertNotIn('will not credit', high.stderr + high.stdout)
+
     def test_signup_failure_is_not_retried(self):
         for status in (1, 75):
             with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:
