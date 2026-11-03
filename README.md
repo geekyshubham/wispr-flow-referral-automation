@@ -2,11 +2,48 @@
 
 Mac tool that creates **N** temp-mail Wispr accounts on your referral link, then simulates **W** dictated words on each account until all N are done. Isolated Wispr is used so your personal login is untouched. When the run finishes (or crashes), **system mic and speakers are restored** and your normal Wispr app is relaunched.
 
+## Refer someone (quick start)
+
+Get the referrer's code from their invite link — the part after `/r?` in `https://wisprflow.ai/r?YOURCODE` — then run:
+
+```bash
+# One new account with 500 server-confirmed words
+./wispr-run --accounts 1 --words 500 --referral YOURCODE
+
+# The command returns immediately; follow the background job here
+tail -f data/wispr-run.log
+```
+
+A finished account logs the live association and the server-side word count:
+
+```text
+REFERRAL_ASSOCIATED:{"referral_applied":true,...,"referer_name":"..."}
+SERVER TARGET REACHED: 569 >= 500
+```
+
+If the website's `/signup` answers `user_exists`, the runner automatically retries the referral through Wispr's authenticated desktop endpoint and reads `GET /api/v1/referral/` back. Dictation only starts after a `referer_name` is present, so no manual API call is needed.
+
+Refer more people by raising `--accounts`; every account gets a fresh mailbox and its own word target:
+
+```bash
+./wispr-run --accounts 2 --words 500 --referral YOURCODE
+```
+
+If a run stops (CAPTCHA, network, signup handoff), finish the browser step if prompted, then continue the same account and batch:
+
+```bash
+./wispr-resume      # continue the saved signup/batch
+./wispr-recheck     # retry a saved referral rejection live
+./wispr-cleanup     # stop everything and restore mic/speakers
+```
+
+Do not start a second job while one is running. One-time prerequisites (Wispr, ego lite, BlackHole, Node/Python, isolated runtime) are in [Mac setup](#mac-setup).
+
 ## Entire flow (per account, looped N times)
 
 ```
 Maildrop inbox (mail.tm is optional)
-  → signup at https://wisprflow.ai/r?SHUBHAM3680 (ego-browser, only Wispr auth state cleared)
+  → signup at https://wisprflow.ai/r?YOURCODE (ego-browser, only Wispr auth state cleared)
   → email verification code (or legacy verification link)
   → isolated Wispr desktop login
   → BlackHole loopback dictation until W words
@@ -21,15 +58,17 @@ Web-only signup stays **Pending / Under 2000 words**. Desktop dictation is requi
 
 ```bash
 # 2 accounts, 2100 words each — returns immediately, job keeps going
-./wispr-run --accounts 2 --words 2100
+./wispr-run --accounts 2 --words 2100 --referral YOURCODE
 
-./wispr-run 2 2100                 # same
-./wispr-run --accounts 1 --words 500
-./wispr-run --fresh --accounts 1 --words 2100 --referral SHUBHAM3680
+./wispr-run 2 2100 --referral YOURCODE   # same
+./wispr-run --accounts 1 --words 500 --referral YOURCODE
+./wispr-run --fresh --accounts 1 --words 2100 --referral YOURCODE
 tail -f data/wispr-run.log         # watch progress
-./wispr-run 2 2100 --foreground    # run in this terminal instead
+./wispr-run 2 2100 --foreground --referral YOURCODE   # run in this terminal
 ./wispr-cleanup                    # abort + full reset anytime
 ```
+
+Always pass `--referral YOURCODE`. If it is omitted, the runner falls back to the default code hardcoded in the script (`SHUBHAM3680`), which is not the referrer you want.
 
 Dictation uses a hidden isolated Wispr and plays TTS into BlackHole, not your speakers. An account is finished only after Wispr **servers** report `total_words` ≥ W (`GET /history/stats`). The desktop normally batches 10 transcripts. Once enough real words are queued, this tool restarts only the isolated test app to flush its history, then verifies the server count. Local progress comes from that profile’s history database, so stale cached statistics cannot finish an account. After **all** accounts finish (or you stop it), it resets: isolated instances quit, completed profiles deleted, incomplete profiles kept for resume, Built-in mic/speakers selected, your normal Wispr relaunched.
 
