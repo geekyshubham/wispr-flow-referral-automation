@@ -7,8 +7,8 @@ Mac tool that creates **N** temp-mail Wispr accounts on your referral link, then
 Get the referrer's code from their invite link — the part after `/r?` in `https://wisprflow.ai/r?YOURCODE` — then run:
 
 ```bash
-# One new account with 500 server-confirmed words
-./wispr-run --accounts 1 --words 500 --referral YOURCODE
+# One credited referral: 2,100 server-confirmed words
+./wispr-run --accounts 1 --words 2100 --referral YOURCODE
 
 # The command returns immediately; follow the background job here
 tail -f data/wispr-run.log
@@ -18,15 +18,17 @@ A finished account logs the live association and the server-side word count:
 
 ```text
 REFERRAL_ASSOCIATED:{"referral_applied":true,...,"referer_name":"..."}
-SERVER TARGET REACHED: 569 >= 500
+SERVER TARGET REACHED: 2203 >= 2100
 ```
 
-If the website's `/signup` answers `user_exists`, the runner automatically retries the referral through Wispr's authenticated desktop endpoint and reads `GET /api/v1/referral/` back. Dictation only starts after a `referer_name` is present, so no manual API call is needed.
+**2,000 dictated words is the referral qualification threshold.** A 500-word run is useful for testing signup and dictation, but the referral stays **Under 2000** on the referrer's dashboard and never credits. Use `--words 2100` when the referral should count.
+
+If the website's `/signup` answers `user_exists`, the runner automatically retries the referral through Wispr's authenticated desktop endpoint and reads `GET /api/v1/referral/` back. Dictation only starts after a `referer_name` is present, so no manual API call is needed. The desktop apply is the normal path: the website creates the account during OTP verification, before its referral-bearing `/signup` call.
 
 Refer more people by raising `--accounts`; every account gets a fresh mailbox and its own word target:
 
 ```bash
-./wispr-run --accounts 2 --words 500 --referral YOURCODE
+./wispr-run --accounts 2 --words 2100 --referral YOURCODE
 ```
 
 If a run stops (CAPTCHA, network, signup handoff), finish the browser step if prompted, then continue the same account and batch:
@@ -61,7 +63,7 @@ Web-only signup stays **Pending / Under 2000 words**. Desktop dictation is requi
 ./wispr-run --accounts 2 --words 2100 --referral YOURCODE
 
 ./wispr-run 2 2100 --referral YOURCODE   # same
-./wispr-run --accounts 1 --words 500 --referral YOURCODE
+./wispr-run --accounts 1 --words 500 --referral YOURCODE   # signup/dictation smoke test only; will not credit
 ./wispr-run --fresh --accounts 1 --words 2100 --referral YOURCODE
 tail -f data/wispr-run.log         # watch progress
 ./wispr-run 2 2100 --foreground --referral YOURCODE   # run in this terminal
@@ -75,6 +77,35 @@ Dictation uses a hidden isolated Wispr and plays TTS into BlackHole, not your sp
 During the job your personal Wispr is paused so deeplinks hit the isolated instance; it comes back in the final cleanup. Signup may still pop ego-browser if hCaptcha needs a click (`./wispr-resume <task-space>`).
 
 Live signup progress is written to `data/signup-progress.log` even while ego-browser buffers its terminal output. Maildrop is the default provider. It polls each inbox at most once every ten seconds and retrieves the full message separately, including MIME decoding. Set `MAIL_PROVIDER=mail.tm` to use mail.tm; its requests are spaced at least one second apart and paced by the server's `RateLimit-Policy`, saved between runs. HTTP 429 retries honor provider cooldowns, with at most three retries. A blocked signup stops the batch and saves its inbox and page in `data/pending-signup.json`. It does not repeatedly create new accounts. Resume that signup with `./wispr-resume`; it completes email verification, dictation, and any remaining accounts using the saved settings.
+
+## Dashboard shows `Past referrals (0)`?
+
+The dashboard is a cache of the live referral list. Check these in order:
+
+1. **Confirm the code.** The invite link and the code shown in the app must match. A code from an old account or a regenerated code can point at a different referrer record.
+2. **Refresh the app cache.** Fully quit Wispr Flow from the menu bar (not just close the hub), reopen it, and open **Refer**. The hub refreshes its cache when that modal opens. An app that has been running since before the referrals were created can keep showing `0`.
+3. **Read the live list.** `Past referrals` is built from `GET https://api.wisprflow.ai/api/v1/referral/` using the referrer's access token:
+
+   ```bash
+   curl -sS -H "Authorization: $WISPR_ACCESS_TOKEN" \
+     https://api.wisprflow.ai/api/v1/referral/ | python3 -m json.tool
+   ```
+
+   Each referee has a `status`:
+   - `PENDING` — signup not finished
+   - `INACTIVE` — signed up, under 2,000 server words
+   - `TWO_K_WORDS` — 2,000+ words, credited
+   - `PAID` — upgraded to Pro
+
+   An `INACTIVE` row is **not missing**; it becomes `TWO_K_WORDS` after the account crosses 2,000 dictated words.
+
+4. **Top up an existing account.** Accounts below 2,000 words can be extended without creating a new signup:
+
+   ```bash
+   TARGET_WORDS=2100 ./wispr-complete-flow email@example.com 'password'
+   ```
+
+A 500-word account will always show as `INACTIVE`. That is the usual reason an earlier referral “did not work”.
 
 ## Mac setup
 
@@ -149,7 +180,7 @@ Login for an already-created account usually skips captcha. OAuth (Google/Apple)
 ./wispr-test 1 --no-dictation          # signup only
 ./wispr-recheck                        # retry a saved referral rejection live
 ./wispr-resume [task-space]            # resume saved signup + complete remaining flow
-./wispr-complete-flow email password   # isolated login + W words + cleanup
+./wispr-complete-flow email password   # isolated login + W words + cleanup (top up an existing account)
 ./wispr-cleanup                        # stop job + reset mic/speakers/Wispr
 bash lib/restore-audio.sh builtin      # force Built-in mic/speakers
 python3 lib/word-count.py profiles/<name>
@@ -164,7 +195,7 @@ Signup checks DNS for Wispr and the selected mail provider before allocating a m
 
 Every new signup uses an address absent from both signup and completion history. Used addresses in the prefetch cache are discarded. `--fresh` archives an unfinished attempt and starts a different mailbox; `./wispr-resume` only continues the current account’s verification or desktop work. A registered address is never submitted for a new signup.
 
-A website `user_exists` rejection is not necessarily final. After `/signup` answers, the runner also calls the authenticated desktop referral endpoint (`POST /api/v1/referral/apply` with `referrer_code`, `dub_click_id`, and `check_credits`) and reads `GET /api/v1/referral/` back to require a non-empty `referer_name`. The website completes email signup before its own referral-bearing `/signup` call, so this desktop path is the normal recovery for a freshly created account. If both paths fail, the attempt is terminal: `./wispr-resume` and same-code `--fresh` stop with status 76. `./wispr-recheck` retries the saved account against the live service and repairs `pending-signup.json` when `referer_name` is present. An explicit `./wispr-run --fresh --referral DIFFERENT_CODE` archives the rejected attempt and starts a separate test with that code; changing the code alone does not resume or replace the saved account. Preserve rejected records for Wispr support; a different code does not establish eligibility or fix a service rejection.
+A website `user_exists` rejection is not necessarily final. After `/signup` answers, the runner also calls the authenticated desktop referral endpoint (`POST /api/v1/referral/apply` with `referrer_code`, `dub_click_id`, and `check_credits`) and reads `GET /api/v1/referral/` back to require a non-empty `referer_name`. The website completes email signup before its own referral-bearing `/signup` call, so this desktop path is the normal recovery for a freshly created account; it creates the row shown in the referrer's live referral list. If both paths fail, the attempt is terminal: `./wispr-resume` and same-code `--fresh` stop with status 76. `./wispr-recheck` retries the saved account against the live service and repairs `pending-signup.json` when `referer_name` is present. An explicit `./wispr-run --fresh --referral DIFFERENT_CODE` archives the rejected attempt and starts a separate test with that code; changing the code alone does not resume or replace the saved account. Preserve rejected records for Wispr support; a different code does not establish eligibility or fix a service rejection.
 
 Only one account-processing job can run at a time. Background startup confirms it acquired the job lock; `./wispr-cleanup` stops the owned process group and restores audio. Failures keep the same account and its remaining batch count. `./wispr-resume` resumes that state, preserves signup-only mode, and skips completed work. Profiles are keyed by the full email address, and completion records are updated instead of duplicated.
 

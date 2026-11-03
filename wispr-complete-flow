@@ -89,7 +89,12 @@ try {
   }
   if (!token) {
     const pending = await readJson(config.dataDir + '/pending-signup.json');
-    const task = await taskSpace(pending?.taskSpaceId ?? 'wispr-signup');
+    let task = null;
+    for (const space of [pending?.taskSpaceId, 'wispr-signup', 'wispr-topup']) {
+      if (space == null) continue;
+      try { task = await taskSpace(space); break; } catch {}
+    }
+    if (!task) throw new Error('Cannot open a browser task space for login');
     token = JSON.parse(await login(task.page('p1'), config.email, config.password));
   }
   await writeJson(config.dataDir + '/last-web-token.json', token);

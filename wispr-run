@@ -58,6 +58,11 @@ if ! [[ "$WORDS" =~ ^[0-9]+$ ]] || [ "$WORDS" -lt 1 ]; then
   echo "words must be a positive integer"
   exit 1
 fi
+if [ "$WORDS" -lt 2000 ]; then
+  echo "WARNING: Wispr referral credit requires 2,000 server-confirmed words." >&2
+  echo "         A ${WORDS}-word account stays 'Under 2000' on the referrer's dashboard and will not credit." >&2
+  echo "         Use --words 2100 for a credited referral." >&2
+fi
 
 if python3 "${SCRIPT_DIR}/lib/job-lock.py" --is-held "$SCRIPT_DIR"; then
   FOREGROUND=1

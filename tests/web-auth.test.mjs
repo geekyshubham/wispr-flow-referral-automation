@@ -15,6 +15,20 @@ test('auth lookup tolerates browser error pages and only reads storage on Wispr'
   }) }, 'test@example.com'), legacy);
 });
 
+test('auth lookup recovers Supabase cookie sessions when localStorage is stale', async () => {
+  const token = claims => 'header.' + Buffer.from(JSON.stringify(claims)).toString('base64url') + '.signature';
+  const claims = { email: 'test@example.com', exp: Math.floor(Date.now() / 1000) + 3600, sub: 'supabase-user', iss: 'https://example.supabase.co/auth/v1' };
+  const cookie = `access_token=${encodeURIComponent(token(claims))}; refresh_token=refresh123`;
+  const stored = await authToken({ evaluate: fn => vm.runInNewContext('(' + fn.toString() + ')(__key)', {
+    location: { origin: 'https://wisprflow.ai' }, document: { cookie }, localStorage: { getItem: () => null }, __key: 'key',
+  }) }, 'test@example.com');
+  const session = JSON.parse(stored);
+  assert.equal(session.provider, 'supabase');
+  assert.equal(session.access_token, token(claims));
+  assert.equal(session.user.id, 'supabase-user');
+  assert.equal(session.user.email, 'test@example.com');
+});
+
 test('mail.tm retries the same request after Retry-After, with paced requests', async () => {
   const pauses = [];
   const requests = [];
