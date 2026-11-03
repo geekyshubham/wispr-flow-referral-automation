@@ -54,7 +54,7 @@ repeat until N accounts have W words each
   → relaunch your normal Wispr Flow
 ```
 
-Web-only signup stays **Pending / Under 2000 words**. Desktop dictation is required. Referral credit uses **server** `/history/stats` (`total_words`), not the local app cache. The job waits for history upload to succeed before treating an account as done.
+A signup without 2,000 dictated words stays **Under 2000** (`INACTIVE`). Desktop dictation is required for credit. Referral credit uses **server** `/history/stats` (`total_words`), not the local app cache. The job waits for history upload to succeed before treating an account as done.
 
 ## Customize N and W (runs in the background)
 
