@@ -78,6 +78,10 @@ During the job your personal Wispr is paused so deeplinks hit the isolated insta
 
 Live signup progress is written to `data/signup-progress.log` even while ego-browser buffers its terminal output. Maildrop is the default provider. It polls each inbox at most once every ten seconds and retrieves the full message separately, including MIME decoding. Set `MAIL_PROVIDER=mail.tm` to use mail.tm; its requests are spaced at least one second apart and paced by the server's `RateLimit-Policy`, saved between runs. HTTP 429 retries honor provider cooldowns, with at most three retries. A blocked signup stops the batch and saves its inbox and page in `data/pending-signup.json`. It does not repeatedly create new accounts. Resume that signup with `./wispr-resume`; it completes email verification, dictation, and any remaining accounts using the saved settings.
 
+## Locking the Mac
+
+The job starts macOS `caffeinate` for its lifetime, so the screen can be locked and the display can turn off. The Mac must not sleep: closing a MacBook lid, logging out, or forcing sleep pauses audio playback and the isolated app. On a MacBook, stay on power and leave the lid open. Set `WISPR_NO_CAFFEINATE=1` to disable this.
+
 ## Dashboard shows `Past referrals (0)`?
 
 The dashboard is a cache of the live referral list. Check these in order:

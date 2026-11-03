@@ -101,7 +101,16 @@ export PYTHONUNBUFFERED=1
 mkdir -p "${SCRIPT_DIR}/data"
 echo "$WISPR_RUN_TOKEN" > "${SCRIPT_DIR}/data/wispr-run-token"
 
+# Keep the machine awake for the whole batch. Screen lock is fine; system
+# sleep is not (audio playback and the isolated app pause with it).
+CAFFEINATE_PID=""
+if [ "${WISPR_NO_CAFFEINATE:-0}" != "1" ] && command -v caffeinate >/dev/null 2>&1; then
+  caffeinate -imsu -w $$ &
+  CAFFEINATE_PID=$!
+fi
+
 restore_all() {
+  if [ -n "$CAFFEINATE_PID" ]; then kill "$CAFFEINATE_PID" 2>/dev/null || true; fi
   token_now="$(cat "${SCRIPT_DIR}/data/wispr-run-token" 2>/dev/null || true)"
   if [ "$token_now" != "$WISPR_RUN_TOKEN" ]; then
     echo "Skipping stale cleanup (token mismatch)."
