@@ -242,14 +242,16 @@ while [ "$ROUND" -lt 40 ]; do
   else
     echo "  No ASR line (continuing)"
   fi
-
+  # The transcript row can land a moment after the ASR line; give the app a
+  # short grace period before treating the chunk as a stall.
+  sleep 2
   AFTER=$(get_words)
   DELTA=$((AFTER - BEFORE))
   echo "  Result: ${BEFORE} -> ${AFTER} (+${DELTA})"
   if [ "$DELTA" -le 0 ]; then
     STALL=$((STALL + 1))
-    echo "  Stall ${STALL}/3"
-    [ "$STALL" -ge 3 ] && { echo "ERROR: Dictation made no progress; profile preserved."; exit 1; }
+    echo "  Stall ${STALL}/5"
+    [ "$STALL" -ge 5 ] && { echo "ERROR: Dictation made no progress; profile preserved."; exit 1; }
     sleep 2
   else
     STALL=0
